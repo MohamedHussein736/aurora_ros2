@@ -512,6 +512,30 @@ namespace slamware_ros_sdk {
 
         pubLaserScan_->publish(msgScan);
 
+        // ====================================================================
+        // LASER TRANSFORM CONFLICT RESOLUTION (Nav2 Compatibility)
+        // ====================================================================
+        // DISABLED: Direct map → laser transform to avoid TF conflicts
+        //
+        // ISSUE: This code was publishing a dynamic transform from map → laser
+        // using the robot's pose (poseSE3). However, this creates a conflict
+        // because:
+        //   1. The launch file publishes a static transform: base_link → laser
+        //   2. This code publishes: map → laser (direct)
+        //   3. This creates TWO paths: map → laser AND map → odom → base_link → laser
+        //
+        // SOLUTION: Use the standard ROS/Nav2 TF chain instead:
+        //   map → odom → base_link → laser
+        //
+        // The static transform base_link → laser is defined in the launch file,
+        // and the odometry provides map → odom → base_link. This is the correct
+        // and standard approach for Nav2 compatibility.
+        //
+        // If you need to re-enable this transform, you would need to:
+        //   - Remove the static base_link → laser transform from launch file, OR
+        //   - Change this to publish base_link → laser instead of map → laser
+        // ====================================================================
+        /*
         geometry_msgs::msg::TransformStamped LaserTrans;
         LaserTrans.header.stamp = msgScan.header.stamp;
         LaserTrans.header.frame_id = srvParams.getParameter<std::string>("map_frame");
@@ -524,6 +548,7 @@ namespace slamware_ros_sdk {
         LaserTrans.transform.rotation.z = poseSE3.quaternion.z;
         LaserTrans.transform.rotation.w = poseSE3.quaternion.w;
         tfBrdcst->sendTransform(LaserTrans);
+        */
     }
 
     void ServerLaserScanWorker::fillRangeMinMaxInMsg_(const std::vector<slamtec_aurora_sdk_lidar_scan_point_t> & laserPoints

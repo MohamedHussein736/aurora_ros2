@@ -48,11 +48,11 @@ namespace slamware_ros_sdk {
         this->declare_parameter<float>("stereo_image_pub_period", 0.05f);
         this->declare_parameter<float>("point_cloud_pub_period", 0.2f);
 
-        this->declare_parameter<std::string>("scan_topic", "/slamware_ros_sdk_server_node/scan");
+        this->declare_parameter<std::string>("scan_topic", "/scan");
         this->declare_parameter<std::string>("robot_pose_topic", "/slamware_ros_sdk_server_node/robot_pose");
-        this->declare_parameter<std::string>("odom_topic", "/slamware_ros_sdk_server_node/odom");
-        this->declare_parameter<std::string>("map_topic", "/slamware_ros_sdk_server_node/map");
-        this->declare_parameter<std::string>("map_info_topic", "/slamware_ros_sdk_server_node/map_metadata");
+        this->declare_parameter<std::string>("odom_topic", "/odom");
+        this->declare_parameter<std::string>("map_topic", "/map");
+        this->declare_parameter<std::string>("map_info_topic", "/map_metadata");
         this->declare_parameter<std::string>("system_status_topic_name", "/slamware_ros_sdk_server_node/system_status");
         this->declare_parameter<std::string>("relocalization_status_topic_name", "/slamware_ros_sdk_server_node/relocalization_status");
         this->declare_parameter<std::string>("left_image_raw_topic_name", "/slamware_ros_sdk_server_node/left_image_raw");
@@ -202,7 +202,7 @@ namespace slamware_ros_sdk {
             nhRos->declare_parameter<float>("imu_raw_data_period", fVal);
         }
         if (nhRos->has_parameter("no_preview_image")) {
-            nhRos->declare_parameter<bool>("imu_raw_data_period", bVal);
+            nhRos->declare_parameter<bool>("no_preview_image", bVal);
         }
         if (nhRos->has_parameter("raw_image_on")) {
             nhRos->declare_parameter<bool>("raw_image_on", bVal);
