@@ -1472,7 +1472,8 @@ namespace slamware_ros_sdk {
 
     cv::Mat ServerEnhancedImagingWorker::colorizeSegmentationMap(const cv::Mat& segMap)
     {
-        cv::Mat colorized(segMap.size(), CV_8UC3);
+        // cv::Mat colorized(segMap.size(), CV_8UC3);
+        cv::Mat colorized(segMap.size().height, segMap.size().width,CV_8UC3);
         for (int y = 0; y < segMap.rows; y++) {
             for (int x = 0; x < segMap.cols; x++) {
                 uint8_t classId = segMap.at<uint8_t>(y, x);
