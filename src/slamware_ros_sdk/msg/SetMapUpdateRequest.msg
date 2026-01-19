@@ -1,3 +1,1 @@
-
 bool enabled
-MapKind kind

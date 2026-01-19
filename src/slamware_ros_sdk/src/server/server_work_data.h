@@ -1,23 +1,20 @@
-/**
- * @file server_work_data.h
- * @brief Defines the ServerWorkData structure and related types for managing server work data in the SLAMWARE ROS SDK.
- */
 
 #pragma once
 
-#include <ros/ros.h>
+#include "rclcpp/rclcpp.hpp"
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 #include "server_map_holder.h"
 
-#include <geometry_msgs/PoseStamped.h>
+#include <atomic>
+#include <memory>
 
-namespace slamware_ros_sdk
-{
+namespace slamware_ros_sdk {
 
     struct ServerWorkData
     {
     public:
-        geometry_msgs::PoseStamped robotPose;
+        geometry_msgs::msg::PoseStamped robotPose;
 
         std::atomic<bool> syncMapRequested;
         ServerMapHolder exploreMapHolder;
@@ -29,7 +26,7 @@ namespace slamware_ros_sdk
         static inline bool sfIsDigitalSensorValueImpact(float fVal) { return fVal < FLT_EPSILON; }
     };
 
-    typedef std::shared_ptr<ServerWorkData> ServerWorkData_Ptr;
-    typedef std::shared_ptr<const ServerWorkData> ServerWorkData_ConstPtr;
-
+    typedef std::shared_ptr<ServerWorkData>               ServerWorkData_Ptr;
+    typedef std::shared_ptr<const ServerWorkData>         ServerWorkData_ConstPtr;
+    
 }

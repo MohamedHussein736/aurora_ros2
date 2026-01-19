@@ -1,14 +1,9 @@
-/**
- * @file server_params.cpp
- * @brief Implementation of the ServerParams class for managing server parameters in the SLAMWARE ROS SDK.
- */
 
 #include "server_params.h"
 
 #include <cmath>
 
-namespace slamware_ros_sdk
-{
+namespace slamware_ros_sdk {
 
     //////////////////////////////////////////////////////////////////////////
 
@@ -18,122 +13,202 @@ namespace slamware_ros_sdk
     //////////////////////////////////////////////////////////////////////////
 
     ServerParams::ServerParams()
+    : Node("server_params")
     {
         resetToDefault();
     }
 
     void ServerParams::resetToDefault()
     {
-        ip_address = "192.168.11.1";
-        robot_port = 1445;
-        reconn_wait_ms = (1000U * 3U);
+        this->declare_parameter<std::string>("ip_address", "192.168.11.1");
+        this->declare_parameter<int>("reconn_wait_ms", 1000 * 3);
 
-        angle_compensate = true;
-        ladar_data_clockwise = true;
+        this->declare_parameter<bool>("angle_compensate", true);
+        this->declare_parameter<bool>("ladar_data_clockwise", true);
 
-        robot_frame = "base_link";
-        laser_frame = "laser";
-        map_frame = "map";
-        imu_frame = "imu_link";
-        camera_left = "camera_left";
-        camera_right = "camera_right";
-        odom_frame = "odom";
+        this->declare_parameter<std::string>("robot_frame", "base_link");
+        this->declare_parameter<std::string>("laser_frame", "laser");
+        this->declare_parameter<std::string>("map_frame", "map");
+        this->declare_parameter<std::string>("odom_frame", "odom");
+        this->declare_parameter<std::string>("imu_frame", "imu_link");
+        this->declare_parameter<std::string>("camera_left", "camera_left");
+        this->declare_parameter<std::string>("camera_right", "camera_right");
 
-        robot_pose_pub_period = 0.05f;
-        scan_pub_period = 0.1f;
-        map_update_period = 0.2f;
-        map_pub_period = 0.2f;
+        this->declare_parameter<float>("odometry_pub_period", 0.1f);
+        this->declare_parameter<float>("robot_pose_pub_period", 0.05f);
+        this->declare_parameter<float>("scan_pub_period", 0.1f);
+        this->declare_parameter<float>("map_update_period", 0.3f);
+        this->declare_parameter<float>("map_pub_period", 0.3f);
 
-        map_sync_once_get_max_wh = 100.f;
-        map_update_near_robot_half_wh = 8.0f;
+        this->declare_parameter<float>("map_sync_once_get_max_wh", 100.f);
+        this->declare_parameter<float>("map_update_near_robot_half_wh", 8.0f);
 
-        imu_raw_data_period = 0.05f;
-        system_status_pub_period = 0.05f;
-        // stereo_image_pub_period = 0.067f;
-        stereo_image_pub_period = 0.05f;
-        point_cloud_pub_period = 0.1f;
-        robot_basic_state_pub_period = 0.1f;
-        odometry_pub_period = 0.1f;
-        enhanced_imaging_pub_period = 0.05f;
+        this->declare_parameter<float>("imu_raw_data_period", 0.005f);
+        this->declare_parameter<float>("system_status_pub_period", 0.1f);
+        this->declare_parameter<float>("stereo_image_pub_period", 0.05f);
+        this->declare_parameter<float>("point_cloud_pub_period", 0.2f);
 
-        scan_topic = "/slamware_ros_sdk_server_node/scan";
-        robot_pose_topic = "/slamware_ros_sdk_server_node/robot_pose";
-        odom_topic = "/slamware_ros_sdk_server_node/odom";
-        map_topic = "/slamware_ros_sdk_server_node/map";
-        map_info_topic = "/slamware_ros_sdk_server_node/map_metadata";
-        system_status_topic_name = "/slamware_ros_sdk_server_node/system_status";
-        relocalization_status_topic_name = "/slamware_ros_sdk_server_node/relocalization_status";
-        left_image_raw_topic_name = "/slamware_ros_sdk_server_node/left_image_raw";
-        right_image_raw_topic_name = "/slamware_ros_sdk_server_node/right_image_raw";
-        point_cloud_topic_name = "/slamware_ros_sdk_server_node/point_cloud";
-        stereo_keypoints_topic_name = "/slamware_ros_sdk_server_node/stereo_keypoints";
-        imu_raw_data_topic = "/slamware_ros_sdk_server_node/imu_raw_data";
-
-        // Enhanced imaging topics
-        depth_image_raw_topic_name = "/slamware_ros_sdk_server_node/depth_image_raw";
-        depth_image_colorized_topic_name = "/slamware_ros_sdk_server_node/depth_image_colorized";
-        semantic_segmentation_topic_name = "/slamware_ros_sdk_server_node/semantic_segmentation";
-
-        event_period = 1.0f;
-        no_preview_image = false;
-        raw_image_on = false;
+        this->declare_parameter<std::string>("scan_topic", "/slamware_ros_sdk_server_node/scan");
+        this->declare_parameter<std::string>("robot_pose_topic", "/slamware_ros_sdk_server_node/robot_pose");
+        this->declare_parameter<std::string>("odom_topic", "/slamware_ros_sdk_server_node/odom");
+        this->declare_parameter<std::string>("map_topic", "/slamware_ros_sdk_server_node/map");
+        this->declare_parameter<std::string>("map_info_topic", "/slamware_ros_sdk_server_node/map_metadata");
+        this->declare_parameter<std::string>("system_status_topic_name", "/slamware_ros_sdk_server_node/system_status");
+        this->declare_parameter<std::string>("relocalization_status_topic_name", "/slamware_ros_sdk_server_node/relocalization_status");
+        this->declare_parameter<std::string>("left_image_raw_topic_name", "/slamware_ros_sdk_server_node/left_image_raw");
+        this->declare_parameter<std::string>("right_image_raw_topic_name", "/slamware_ros_sdk_server_node/right_image_raw");
+        this->declare_parameter<std::string>("point_cloud_topic_name", "/slamware_ros_sdk_server_node/point_cloud");
+        this->declare_parameter<std::string>("stereo_keypoints_topic_name", "/slamware_ros_sdk_server_node/stereo_keypoints");
         
-    }
-
-    void ServerParams::setBy(const ros::NodeHandle &nhRos)
-    {
-
-        nhRos.getParam("event_period", event_period);
-
-        // new ----------------
-        nhRos.getParam("ip_address", ip_address);
-        nhRos.getParam("reconn_wait_ms", reconn_wait_ms);
-
-        nhRos.getParam("angle_compensate", angle_compensate);
-        nhRos.getParam("ladar_data_clockwise", ladar_data_clockwise);
-
-        nhRos.getParam("robot_frame", robot_frame);
-        nhRos.getParam("laser_frame", laser_frame);
-        nhRos.getParam("map_frame", map_frame);
-        nhRos.getParam("imu_frame", imu_frame);
-        nhRos.getParam("camera_left", camera_left);
-        nhRos.getParam("camera_right", camera_right);
-        nhRos.getParam("odom_frame", odom_frame);
-
-        nhRos.getParam("robot_pose_pub_period", robot_pose_pub_period);
-        nhRos.getParam("scan_pub_period", scan_pub_period);
-        nhRos.getParam("map_update_period", map_update_period);
-        nhRos.getParam("map_pub_period", map_pub_period);
-
-        nhRos.getParam("map_sync_once_get_max_wh", map_sync_once_get_max_wh);
-        nhRos.getParam("map_update_near_robot_half_wh", map_update_near_robot_half_wh);
-
-        nhRos.getParam("imu_raw_data_period", imu_raw_data_period);
-        nhRos.getParam("system_status_pub_period", system_status_pub_period);
-        nhRos.getParam("stereo_image_pub_period", stereo_image_pub_period);
-        nhRos.getParam("point_cloud_pub_period", point_cloud_pub_period);
-        nhRos.getParam("robot_basic_state_pub_period", robot_basic_state_pub_period);
-        nhRos.getParam("odometry_pub_period", odometry_pub_period);
-
-        nhRos.getParam("scan_topic", scan_topic);
-        nhRos.getParam("robot_pose_topic", robot_pose_topic);
-        nhRos.getParam("odom_topic", odom_topic);
-        nhRos.getParam("map_topic", map_topic);
-        nhRos.getParam("map_info_topic", map_info_topic);
-        nhRos.getParam("system_status_topic_name", system_status_topic_name);
-        nhRos.getParam("relocalization_status_topic_name", relocalization_status_topic_name);
-        nhRos.getParam("left_image_raw_topic_name", left_image_raw_topic_name);
-        nhRos.getParam("right_image_raw_topic_name", right_image_raw_topic_name);
-        nhRos.getParam("point_cloud_topic_name", point_cloud_topic_name);
-        nhRos.getParam("stereo_keypoints_topic_name", stereo_keypoints_topic_name);
-        nhRos.getParam("imu_raw_data_topic", imu_raw_data_topic);
         // Enhanced imaging topics
-        nhRos.getParam("depth_image_raw_topic_name", depth_image_raw_topic_name);
-        nhRos.getParam("depth_image_colorized_topic_name", depth_image_colorized_topic_name);
-        nhRos.getParam("semantic_segmentation_topic_name", semantic_segmentation_topic_name);
+        this->declare_parameter<std::string>("depth_image_raw_topic_name", "/slamware_ros_sdk_server_node/depth_image_raw");
+        this->declare_parameter<std::string>("depth_image_colorized_topic_name", "/slamware_ros_sdk_server_node/depth_image_colorized");
+        this->declare_parameter<std::string>("semantic_segmentation_topic_name", "/slamware_ros_sdk_server_node/semantic_segmentation");
 
-        nhRos.getParam("no_preview_image", no_preview_image);
-        nhRos.getParam("raw_image_on", raw_image_on);
+        this->declare_parameter<std::string>("imu_raw_data_topic", "/slamware_ros_sdk_server_node/imu_raw_data");
+
+        // false: enable compressed image stream, true: disable this stream to save cpu cost
+        this->declare_parameter<bool>("no_preview_image", false); 
+        //false: disable raw image stream, true: enable raw image stream,please make sure the network bandwidth is no less than 300mbps
+        this->declare_parameter<bool>("raw_image_on", false); 
     }
 
+    void ServerParams::setBy(const std::shared_ptr<rclcpp::Node> nhRos)
+    {
+        std::string strVal;
+        bool bVal;
+        int iVal;
+        float fVal;
+        if (nhRos->has_parameter("ip_address")) {
+            nhRos->declare_parameter<std::string>("ip_address", strVal);
+        }
+        if (nhRos->has_parameter("reconn_wait_ms")) {
+            nhRos->declare_parameter<int>("reconn_wait_ms", iVal);
+        }
+        if (nhRos->has_parameter("angle_compensate")) {
+            nhRos->declare_parameter<bool>("angle_compensate", bVal);
+        }
+        if (nhRos->has_parameter("ladar_data_clockwise")) {
+            nhRos->declare_parameter<bool>("ladar_data_clockwise", bVal);
+        }
+
+        if (nhRos->has_parameter("robot_frame")) {
+            nhRos->declare_parameter<std::string>("robot_frame", strVal);
+        }
+        if (nhRos->has_parameter("laser_frame")) {
+            nhRos->declare_parameter<std::string>("laser_frame", strVal);
+        }
+        if (nhRos->has_parameter("map_frame")) {
+            nhRos->declare_parameter<std::string>("map_frame", strVal);
+        }
+        if (nhRos->has_parameter("odom_frame"))
+        {
+            nhRos->declare_parameter<std::string>("odom_frame", strVal);
+        }
+        if (nhRos->has_parameter("imu_frame")) {
+            nhRos->declare_parameter<std::string>("imu_frame", strVal);
+        }
+        if (nhRos->has_parameter("camera_left")) {
+            nhRos->declare_parameter<std::string>("camera_left", strVal);
+        }
+        if (nhRos->has_parameter("camera_right")) {
+            nhRos->declare_parameter<std::string>("camera_right", strVal);
+        }
+        if (nhRos->has_parameter("odometry_pub_period"))
+        {
+            nhRos->declare_parameter<float>("odometry_pub_period", fVal);
+        }
+        if (nhRos->has_parameter("robot_pose_pub_period")) {
+            nhRos->declare_parameter<float>("robot_pose_pub_period", fVal);
+        }
+        if (nhRos->has_parameter("scan_pub_period")) {
+            nhRos->declare_parameter<float>("scan_pub_period", fVal);
+        }
+        if (nhRos->has_parameter("map_update_period")) {
+            nhRos->declare_parameter<float>("map_update_period", fVal);
+        }
+        if (nhRos->has_parameter("map_pub_period")) {
+            nhRos->declare_parameter<float>("map_pub_period", fVal);
+        }
+        if (nhRos->has_parameter("map_sync_once_get_max_wh")) {
+            nhRos->declare_parameter<float>("map_sync_once_get_max_wh", fVal);
+        }
+        if (nhRos->has_parameter("map_update_near_robot_half_wh")) {
+            nhRos->declare_parameter<float>("map_update_near_robot_half_wh", fVal);
+        }
+        if (nhRos->has_parameter("system_status_pub_period")) {
+            nhRos->declare_parameter<float>("system_status_pub_period", fVal);
+        }
+        if (nhRos->has_parameter("stereo_image_pub_period")) {
+            nhRos->declare_parameter<float>("stereo_image_pub_period", fVal);
+        }
+        if (nhRos->has_parameter("point_cloud_pub_period")) {
+            nhRos->declare_parameter<float>("point_cloud_pub_period", fVal);
+        }
+
+        if (nhRos->has_parameter("scan_topic")) {
+            nhRos->declare_parameter<std::string>("scan_topic", strVal);
+        }
+        if (nhRos->has_parameter("odom_topic"))
+        {
+            nhRos->declare_parameter<std::string>("odom_topic", strVal);
+        }
+        if (nhRos->has_parameter("robot_pose_topic")) {
+            nhRos->declare_parameter<std::string>("robot_pose_topic", strVal);
+        }
+        if (nhRos->has_parameter("map_topic")) {
+            nhRos->declare_parameter<std::string>("map_topic", strVal);
+        }
+        if (nhRos->has_parameter("map_info_topic")) {
+            nhRos->declare_parameter<std::string>("map_info_topic", strVal);
+        }
+        if (nhRos->has_parameter("system_status_topic_name")) {
+            nhRos->declare_parameter<std::string>("system_status_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("relocalization_status_topic_name")) {
+            nhRos->declare_parameter<std::string>("relocalization_status_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("left_image_raw_topic_name")) {
+            nhRos->declare_parameter<std::string>("left_image_raw_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("right_image_raw_topic_name")) {
+            nhRos->declare_parameter<std::string>("right_image_raw_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("point_cloud_topic_name")) {
+            nhRos->declare_parameter<std::string>("point_cloud_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("stereo_keypoints_topic_name")) {
+            nhRos->declare_parameter<std::string>("stereo_keypoints_topic_name", strVal);
+        }
+        
+        // Enhanced imaging topics
+        if (nhRos->has_parameter("depth_image_raw_topic_name")) {
+            nhRos->declare_parameter<std::string>("depth_image_raw_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("depth_image_colorized_topic_name")) {
+            nhRos->declare_parameter<std::string>("depth_image_colorized_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("semantic_segmentation_topic_name")) {
+            nhRos->declare_parameter<std::string>("semantic_segmentation_topic_name", strVal);
+        }
+        if (nhRos->has_parameter("right_image_keypoints_topic_name")) {
+            nhRos->declare_parameter<std::string>("right_image_keypoints_topic_name", strVal);
+        }
+        
+        if (nhRos->has_parameter("imu_raw_data_topic")) {
+            nhRos->declare_parameter<std::string>("imu_raw_data_topic", strVal);
+        }
+        if (nhRos->has_parameter("imu_raw_data_period")) {
+            nhRos->declare_parameter<float>("imu_raw_data_period", fVal);
+        }
+        if (nhRos->has_parameter("no_preview_image")) {
+            nhRos->declare_parameter<bool>("imu_raw_data_period", bVal);
+        }
+        if (nhRos->has_parameter("raw_image_on")) {
+            nhRos->declare_parameter<bool>("raw_image_on", bVal);
+        }
+    }
+
+    //////////////////////////////////////////////////////////////////////////
+    
 }

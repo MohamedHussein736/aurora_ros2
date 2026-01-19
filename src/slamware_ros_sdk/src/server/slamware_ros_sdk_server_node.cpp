@@ -1,30 +1,31 @@
 /**
- * @file slamware_ros_sdk_server_node.cpp
- * @brief Entry point for the Slamware ROS SDK server node.
- *
- * Original author: kint.zhao (huasheng_zyh@163.com), 2017-07-21
- * Modified by: yun.li@slamtec.com, 2019
- */
+ kint.zhao  huasheng_zyh@163.com
+   2017.0721
 
-#include "slamware_ros_sdk_server.h"
-#include <ros/ros.h>
+  modified by yun.li@slamtec.com, 2019.
+*/
 
-int main(int argc, char **argv)
+#include "rclcpp/rclcpp.hpp"
+
+#include  "slamware_ros_sdk_server.h"
+
+int main(int argc, char** argv)
 {
-  std::string errMsg;
-  ros::init(argc, argv, "slamware_ros_sdk_server_node");
+    std::string errMsg;
+    rclcpp::init(argc, argv);
 
-  slamware_ros_sdk::SlamwareRosSdkServer rosSdkServer;
-  if (!rosSdkServer.startRun(errMsg))
-  {
-    ROS_ERROR("failed to start slamware ros sdk server: %s.", errMsg.c_str());
-    return -1;
-  }
+    auto rosSdkServer = std::make_shared<slamware_ros_sdk::SlamwareRosSdkServer>();
+    if (!rosSdkServer->startRun(errMsg))
+    {
+        RCLCPP_ERROR(rclcpp::get_logger("server node"), "failed to start slamware ros sdk server: %s.", errMsg.c_str());
+        return -1;
+    }
 
-  ros::spin();
+    rclcpp::spin(rosSdkServer);
+    RCLCPP_INFO(rclcpp::get_logger("server node"), "node spin over.");
 
-  rosSdkServer.requestStop();
-  rosSdkServer.waitUntilStopped();
-
-  return 0;
+    rosSdkServer->requestStop();
+    rosSdkServer->waitUntilStopped();
+    
+    return 0;
 }

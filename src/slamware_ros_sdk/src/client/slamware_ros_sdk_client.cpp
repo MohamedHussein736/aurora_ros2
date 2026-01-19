@@ -1,15 +1,12 @@
-/**
- * @file slamware_ros_sdk_client.cpp
- * @brief Implementation of the SlamwareRosSdkClient class for interacting with the Slamware ROS SDK.
- */
 
 #include <slamware_ros_sdk/slamware_ros_sdk_client.h>
 
-namespace slamware_ros_sdk
-{
-
-    SlamwareRosSdkClient::SlamwareRosSdkClient(ros::NodeHandle &nhRos, const char *serverNodeName, const char *msgNamePrefix)
-        : nh_(&nhRos)
+namespace slamware_ros_sdk {
+    
+    SlamwareRosSdkClient::SlamwareRosSdkClient(const char* serverNodeName
+        , const char* msgNamePrefix
+        )
+        : Node("slamware_ros_sdk_client")
     {
         if (nullptr != serverNodeName)
             sdkServerNodeName_ = serverNodeName;
@@ -31,17 +28,16 @@ namespace slamware_ros_sdk
 
         // initialize publishers
         {
-            pubSyncMap_ = nh_->advertise<SyncMapRequest>(genTopicFullName_("sync_map"), 1);
-
-            pubClearMap_ = nh_->advertise<ClearMapRequest>(genTopicFullName_("clear_map"), 1);
-            pubSetMapUpdate_ = nh_->advertise<SetMapUpdateRequest>(genTopicFullName_("set_map_update"), 1);
-            pubSetMapLocalization_ = nh_->advertise<SetMapLocalizationRequest>(genTopicFullName_("set_map_localization"), 1);
+            pubSyncMap_ = this->create_publisher<slamware_ros_sdk::msg::SyncMapRequest>(genTopicFullName_("sync_map"), 1);
+            pubClearMap_ = this->create_publisher<slamware_ros_sdk::msg::ClearMapRequest>(genTopicFullName_("clear_map"), 1);
+            pubSetMapUpdate_ = this->create_publisher<slamware_ros_sdk::msg::SetMapUpdateRequest>(genTopicFullName_("set_map_update"), 1);
+            pubSetMapLocalization_ = this->create_publisher<slamware_ros_sdk::msg::SetMapLocalizationRequest>(genTopicFullName_("set_map_localization"), 1);
         }
 
         // initialize service clients
         {
-            scSyncGetStcm_ = nh_->serviceClient<SyncGetStcm>(genTopicFullName_("sync_get_stcm"));
-            scSyncSetStcm_ = nh_->serviceClient<SyncSetStcm>(genTopicFullName_("sync_set_stcm"));
+            scSyncGetStcm_ = this->create_client<slamware_ros_sdk::srv::SyncGetStcm>(genTopicFullName_("sync_get_stcm"));
+            scSyncSetStcm_ = this->create_client<slamware_ros_sdk::srv::SyncSetStcm>(genTopicFullName_("sync_set_stcm"));
         }
     }
 
@@ -50,86 +46,92 @@ namespace slamware_ros_sdk
         //
     }
 
-    bool SlamwareRosSdkClient::syncGetStcm(std::string &errMsg, const std::string &filePath)
+    bool SlamwareRosSdkClient::syncGetStcm(std::string& errMsg , const std::string& filePath)
     {
-
         errMsg.clear();
-
-        slamware_ros_sdk::SyncGetStcm srv;
-        srv.request.mapfile = filePath;
-
-        if (!scSyncGetStcm_.waitForExistence(ros::Duration(1.0)))
         {
-            if (!ros::ok())
+            auto request = std::make_shared<slamware_ros_sdk::srv::SyncGetStcm::Request>();
+            request->mapfile = filePath;
+
+            while (!scSyncGetStcm_->wait_for_service(std::chrono::seconds(1)))
             {
-                ROS_ERROR("Interrupted while waiting for the service. Exiting.");
-                errMsg = "Interrupted while waiting for the service. Exiting.";
-                return false;
+                if (!rclcpp::ok())
+                {
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Interrupted while waiting for the service. Exiting.");
+                    errMsg = "Interrupted while waiting for the service. Exiting.";
+                    return false;
+                }
+                RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Service not available, waiting again...");
             }
-            ROS_INFO("Service not available, waiting again...");
-        }
 
-        if (scSyncGetStcm_.call(srv))
-        {
-            if (srv.response.success)
+            auto result = scSyncGetStcm_->async_send_request(request);
+
+            if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result) ==
+                rclcpp::FutureReturnCode::SUCCESS)
             {
-                ROS_INFO("Map downloaded successfully");
-                return true;
+                auto response = result.get();
+                if (response->success)
+                {
+                    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Map downloaded successfully");
+                    return true;
+                }
+                else
+                {
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to get map info: %s", response->message.c_str());
+                    errMsg = "Failed to get map info: " + response->message;
+                    return false;
+                }
             }
             else
             {
-                ROS_ERROR("Failed to get map info: %s", srv.response.message.c_str());
-                errMsg = "Failed to get map info: " + srv.response.message;
+                RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service sync_get_stcm");
+                errMsg = "Failed to call service sync_get_stcm";
                 return false;
             }
         }
-        else
-        {
-            ROS_ERROR("Failed to call service sync_get_stcm");
-            errMsg = "Failed to call service sync_get_stcm";
-            return false;
-        }
+        return true;
     }
 
-    bool SlamwareRosSdkClient::syncSetStcm(const std::string &mapfile,
-                                           std::string &errMsg)
+    bool SlamwareRosSdkClient::syncSetStcm(const std::string &mapfile, 
+        std::string& errMsg)
     {
         errMsg.clear();
-        slamware_ros_sdk::SyncSetStcm srv;
-        srv.request.mapfile = mapfile;
-
-        ROS_INFO("Uploading map %s", mapfile.c_str());
-
-        if (!scSyncSetStcm_.waitForExistence(ros::Duration(1.0)))
+        auto request = std::make_shared<slamware_ros_sdk::srv::SyncSetStcm::Request>();
+        request->mapfile = mapfile;
+        RCLCPP_INFO(this->get_logger(), "Uploading map %s", mapfile.c_str());
+        while (!scSyncSetStcm_->wait_for_service(std::chrono::seconds(1)))
         {
-            if (!ros::ok())
+            if (!rclcpp::ok())
             {
-                ROS_ERROR("Interrupted while waiting for the service. Exiting.");
+                RCLCPP_ERROR(this->get_logger(), "Interrupted while waiting for the service. Exiting.");
                 return false;
             }
-            ROS_INFO("Service not available, waiting again...");
+            RCLCPP_INFO(this->get_logger(), "Service not available, waiting again...");
         }
 
-        if (scSyncSetStcm_.call(srv))
+        auto result = scSyncSetStcm_->async_send_request(request);
+
+        if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result) ==
+            rclcpp::FutureReturnCode::SUCCESS)
         {
-            if (srv.response.success)
+            auto response = result.get();
+            if (response->success)
             {
-                ROS_INFO("Map upload completed successfully");
+                RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Map upload completed successfully");
                 return true;
             }
             else
             {
-                ROS_ERROR("Failed to upload map: %s", srv.response.message.c_str());
-                errMsg = "Failed to upload map " + srv.response.message;
+                RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to upload map: %s", response->message.c_str());
+                errMsg = "Failed to upload map " + response->message;
                 return false;
             }
         }
         else
         {
-            ROS_ERROR("Failed to call service sync_set_stcm");
+            RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service sync_set_stcm");
             errMsg = "Failed to call service sync_set_stcm";
             return false;
         }
     }
-
 }

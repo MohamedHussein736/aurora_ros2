@@ -1,23 +1,19 @@
-﻿/**
- * @file server_map_holder.cpp
- * @brief Implementation of the ServerMapHolder class for managing map data in the SLAMWARE ROS SDK.
- */
-
-#include "server_map_holder.h"
+﻿#include "server_map_holder.h"
 #include <cassert>
+
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
 
-namespace slamware_ros_sdk
-{
+namespace slamware_ros_sdk {
 
     const float ServerMapHolder::C_DEFAULT_RESOLUTION = 0.05f;
     const std::uint32_t ServerMapHolder::C_MAP_DATA_SIZE_ALIGNMENT = 16u;
     const int ServerMapHolder::C_DEFAULT_MORE_CELL_CNT_TO_EXTEND = 32;
 
     ServerMapHolder::ServerMapHolder()
-        : moreCellCntToExtend_(C_DEFAULT_MORE_CELL_CNT_TO_EXTEND), resolution_(C_DEFAULT_RESOLUTION)
+        : moreCellCntToExtend_(C_DEFAULT_MORE_CELL_CNT_TO_EXTEND)
+        , resolution_(C_DEFAULT_RESOLUTION)
     {
         //
     }
@@ -49,7 +45,7 @@ namespace slamware_ros_sdk
         moreCellCntToExtend_ = (0 <= moreCellCntToExtend ? moreCellCntToExtend : C_DEFAULT_MORE_CELL_CNT_TO_EXTEND);
     }
 
-    void ServerMapHolder::reserveByCellIdxRect(const utils::RectangleI &cellIdxRect)
+    void ServerMapHolder::reserveByCellIdxRect(const utils::RectangleI& cellIdxRect)
     {
         if (sfIsCellIdxRectEmpty(cellIdxRect))
             return;
@@ -89,15 +85,15 @@ namespace slamware_ros_sdk
         availMapArea_ = calcAreaByCellIdxRect(availCellIdxRect_);
         mapDat_.swap(newMapDat);
 
-#if 0
-        ROS_INFO("ServerMapHolder::reserveByCellIdxRect(), avail rect: ((%d, %d), (%d, %d)), avail area: ((%f, %f), (%f, %f))."
+    #if 0
+        RCLCPP_INFO(node->get_logger(), "ServerMapHolder::reserveByCellIdxRect(), avail rect: ((%d, %d), (%d, %d)), avail area: ((%f, %f), (%f, %f))."
             , availCellIdxRect_.x(), availCellIdxRect_.y(), availCellIdxRect_.width(), availCellIdxRect_.height()
             , availMapArea_.x(), availMapArea_.y(), availMapArea_.width(), availMapArea_.height()
             );
-#endif
+    #endif
     }
 
-    void ServerMapHolder::reserveByArea(const utils::RectangleF &reqArea)
+    void ServerMapHolder::reserveByArea(const utils::RectangleF& reqArea)
     {
         if (reqArea.empty())
             return;
@@ -106,7 +102,7 @@ namespace slamware_ros_sdk
         reserveByCellIdxRect(minBoundingCellIdxRect);
     }
 
-    void ServerMapHolder::setMapData(float x, float y, float resolution, int dimensionX, int dimensionY, const cell_value_t *srcDat)
+    void ServerMapHolder::setMapData(float x, float y, float resolution, int dimensionX, int dimensionY, const cell_value_t* srcDat)
     {
         if (dimensionX < 1 || dimensionY < 1)
             return;
@@ -114,7 +110,11 @@ namespace slamware_ros_sdk
 
         sfCheckResolutionEquality_(resolution, resolution_);
 
-        const utils::RectangleI cellIdxRectToUp(static_cast<int>(std::round(x / resolution_)), static_cast<int>(std::round(y / resolution_)), dimensionX, dimensionY);
+        const utils::RectangleI cellIdxRectToUp(static_cast<int>(std::round(x / resolution_))
+            , static_cast<int>(std::round(y / resolution_))
+            , dimensionX
+            , dimensionY
+            );
         checkToExtendMap_(cellIdxRectToUp);
 
         const int destOffX = cellIdxRectToUp.x() - availCellIdxRect_.x();
@@ -140,7 +140,7 @@ namespace slamware_ros_sdk
         validMapArea_ = calcAreaByCellIdxRect(validCellIdxRect_);
     }
 
-    utils::RectangleI ServerMapHolder::fillRosMapMsg(const utils::RectangleI &reqIdxRect, nav_msgs::GetMap::Response &msgMap) const
+    utils::RectangleI ServerMapHolder::fillRosMapMsg(const utils::RectangleI& reqIdxRect, nav_msgs::srv::GetMap::Response& msgMap) const
     {
         const auto resIdxRect = reqIdxRect;
         const auto resArea = calcAreaByCellIdxRect(resIdxRect);
@@ -184,11 +184,11 @@ namespace slamware_ros_sdk
                     {
                         const auto tVal = mapDat_[tSrcIdx];
                         if (0 == tVal)
-                            msgMap.map.data[tDestIdx] = -1; // unknown
+                            msgMap.map.data[tDestIdx] = -1;  // unknown
                         else if (tVal <= 127)
-                            msgMap.map.data[tDestIdx] = 0; // free
+                            msgMap.map.data[tDestIdx] = 0;  // free
                         else if (127 < tVal)
-                            msgMap.map.data[tDestIdx] = 100; // occupied
+                            msgMap.map.data[tDestIdx] = 100;  // occupied
                         //
                         ++tSrcIdx;
                         ++tDestIdx;
@@ -203,7 +203,7 @@ namespace slamware_ros_sdk
         return resIdxRect;
     }
 
-    utils::RectangleI ServerMapHolder::fillRosMapMsg(const utils::RectangleF &reqArea, nav_msgs::GetMap::Response &msgMap) const
+    utils::RectangleI ServerMapHolder::fillRosMapMsg(const utils::RectangleF& reqArea, nav_msgs::srv::GetMap::Response& msgMap) const
     {
         utils::RectangleI reqIdxRect;
         if (!reqArea.empty())
@@ -211,12 +211,12 @@ namespace slamware_ros_sdk
         return fillRosMapMsg(reqIdxRect, msgMap);
     }
 
-    utils::RectangleI ServerMapHolder::fillRosMapMsg(nav_msgs::GetMap::Response &msgMap) const
+    utils::RectangleI ServerMapHolder::fillRosMapMsg(nav_msgs::srv::GetMap::Response& msgMap) const
     {
         return fillRosMapMsg(validCellIdxRect_, msgMap);
     }
 
-    bool ServerMapHolder::sfDoesCellIdxRectContain(const utils::RectangleI &cellIdxRect, const utils::RectangleI &objRect)
+    bool ServerMapHolder::sfDoesCellIdxRectContain(const utils::RectangleI& cellIdxRect, const utils::RectangleI& objRect)
     {
         if (sfIsCellIdxRectEmpty(cellIdxRect))
             return false;
@@ -225,10 +225,14 @@ namespace slamware_ros_sdk
 
         const int objXEnd = (0 < objRect.width() ? (objRect.x() + objRect.width()) : objRect.x());
         const int objYEnd = (0 < objRect.height() ? (objRect.y() + objRect.height()) : objRect.y());
-        return (cellIdxRect.x() <= objRect.x() && objRect.x() < xEnd && objXEnd <= xEnd && cellIdxRect.y() <= objRect.y() && objRect.y() < yEnd && objYEnd <= yEnd);
+        return (cellIdxRect.x() <= objRect.x() && objRect.x() < xEnd
+            && objXEnd <= xEnd
+            && cellIdxRect.y() <= objRect.y() && objRect.y() < yEnd
+            && objYEnd <= yEnd
+            );
     }
 
-    utils::RectangleI ServerMapHolder::sfMergeCellIdxRect(const utils::RectangleI &idxRectA, const utils::RectangleI &idxRectB)
+    utils::RectangleI ServerMapHolder::sfMergeCellIdxRect(const utils::RectangleI& idxRectA, const utils::RectangleI& idxRectB)
     {
         if (sfIsCellIdxRectEmpty(idxRectB))
             return idxRectA;
@@ -247,12 +251,18 @@ namespace slamware_ros_sdk
 
         assert(xMin < xEnd);
         assert(yMin < yEnd);
-        return utils::RectangleI(xMin, yMin, (xEnd - xMin), (yEnd - yMin));
+        return utils::RectangleI(xMin
+            , yMin
+            , (xEnd - xMin)
+            , (yEnd - yMin)
+            );
     }
 
-    utils::RectangleI ServerMapHolder::sfIntersectionOfCellIdxRect(const utils::RectangleI &idxRectA, const utils::RectangleI &idxRectB)
+    utils::RectangleI ServerMapHolder::sfIntersectionOfCellIdxRect(const utils::RectangleI& idxRectA, const utils::RectangleI& idxRectB)
     {
-        if (sfIsCellIdxRectEmpty(idxRectA) || sfIsCellIdxRectEmpty(idxRectB))
+        if (sfIsCellIdxRectEmpty(idxRectA)
+            || sfIsCellIdxRectEmpty(idxRectB)
+            )
         {
             return utils::RectangleI();
         }
@@ -267,19 +277,27 @@ namespace slamware_ros_sdk
         const int xEnd = std::min<int>(aXEnd, bXEnd);
         const int yEnd = std::min<int>(aYEnd, bYEnd);
 
-        return utils::RectangleI(xMin, yMin, (xMin < xEnd ? (xEnd - xMin) : 0), (yMin < yEnd ? (yEnd - yMin) : 0));
+        return utils::RectangleI(xMin
+            , yMin
+            , (xMin < xEnd ? (xEnd - xMin) : 0)
+            , (yMin < yEnd ? (yEnd - yMin) : 0)
+            );
     }
 
-    utils::RectangleF ServerMapHolder::sfCalcAreaByCellIdxRect(float resolution, const utils::RectangleI &cellIdxRect)
+    utils::RectangleF ServerMapHolder::sfCalcAreaByCellIdxRect(float resolution, const utils::RectangleI& cellIdxRect)
     {
         assert(FLT_EPSILON < resolution);
-        return utils::RectangleF(resolution * cellIdxRect.x(), resolution * cellIdxRect.y(), resolution * cellIdxRect.width(), resolution * cellIdxRect.height());
+        return utils::RectangleF(resolution * cellIdxRect.x()
+            , resolution * cellIdxRect.y()
+            , resolution * cellIdxRect.width()
+            , resolution * cellIdxRect.height()
+            );
     }
 
-    utils::RectangleI ServerMapHolder::sfCalcMinBoundingCellIdxRect(float resolution, const utils::RectangleF &reqArea)
+    utils::RectangleI ServerMapHolder::sfCalcMinBoundingCellIdxRect(float resolution, const utils::RectangleF& reqArea)
     {
         assert(FLT_EPSILON < resolution);
-
+        
         int idxXMin = static_cast<int>(std::floor(reqArea.x() / resolution));
         if (reqArea.x() < resolution * idxXMin)
             --idxXMin;
@@ -300,30 +318,38 @@ namespace slamware_ros_sdk
 
         assert(idxXMin <= idxXMax);
         assert(idxYMin <= idxYMax);
-        return utils::RectangleI(idxXMin, idxYMin, (idxXMax - idxXMin + 1), (idxYMax - idxYMin + 1));
+        return utils::RectangleI(idxXMin
+            , idxYMin
+            , (idxXMax - idxXMin + 1)
+            , (idxYMax - idxYMin + 1)
+            );
     }
 
-    utils::RectangleF ServerMapHolder::sfCalcMinBoundingArea(float resolution, const utils::RectangleF &reqArea)
+    utils::RectangleF ServerMapHolder::sfCalcMinBoundingArea(float resolution, const utils::RectangleF& reqArea)
     {
         assert(FLT_EPSILON < resolution);
         const auto minBoundingCellIdxRect = sfCalcMinBoundingCellIdxRect(resolution, reqArea);
         return sfCalcAreaByCellIdxRect(resolution, minBoundingCellIdxRect);
     }
 
-    utils::RectangleI ServerMapHolder::sfCalcRoundedCellIdxRect(float resolution, const utils::RectangleF &reqArea)
+    utils::RectangleI ServerMapHolder::sfCalcRoundedCellIdxRect(float resolution, const utils::RectangleF& reqArea)
     {
         assert(FLT_EPSILON < resolution);
-        return utils::RectangleI(static_cast<int>(std::round(reqArea.x() / resolution)), static_cast<int>(std::round(reqArea.y() / resolution)), static_cast<int>(std::round(reqArea.width() / resolution)), static_cast<int>(std::round(reqArea.height() / resolution)));
+        return utils::RectangleI(static_cast<int>(std::round(reqArea.x() / resolution))
+            , static_cast<int>(std::round(reqArea.y() / resolution))
+            , static_cast<int>(std::round(reqArea.width() / resolution))
+            , static_cast<int>(std::round(reqArea.height() / resolution))
+            );
     }
 
-    utils::RectangleF ServerMapHolder::sfCalcRoundedArea(float resolution, const utils::RectangleF &reqArea)
+    utils::RectangleF ServerMapHolder::sfCalcRoundedArea(float resolution, const utils::RectangleF& reqArea)
     {
         assert(FLT_EPSILON < resolution);
         const auto roundedCellIdxRect = sfCalcRoundedCellIdxRect(resolution, reqArea);
         return sfCalcAreaByCellIdxRect(resolution, roundedCellIdxRect);
     }
 
-    void ServerMapHolder::checkToExtendMap_(const utils::RectangleI &cellIdxRectToUp)
+    void ServerMapHolder::checkToExtendMap_(const utils::RectangleI& cellIdxRectToUp)
     {
         assert(0 <= moreCellCntToExtend_);
         assert(0 <= availCellIdxRect_.width());
@@ -354,7 +380,11 @@ namespace slamware_ros_sdk
 
         assert(tXMin < tXEnd);
         assert(tYMin < tYEnd);
-        const auto tCellIdxRect = utils::RectangleI(tXMin, tYMin, (tXEnd - tXMin), (tYEnd - tYMin));
+        const auto tCellIdxRect = utils::RectangleI(tXMin
+            , tYMin
+            , (tXEnd - tXMin)
+            , (tYEnd - tYMin)
+            );
         reserveByCellIdxRect(tCellIdxRect);
     }
 
@@ -367,7 +397,7 @@ namespace slamware_ros_sdk
     void ServerMapHolder::sfCheckResolutionEquality_(float resA, float resB)
     {
         if (std::abs(resA - resB) > FLT_EPSILON)
-            throw std::runtime_error("inconsistent resolution.");
+          throw std::runtime_error("inconsistent resolution.");
         if (resA <= FLT_EPSILON)
             throw std::runtime_error("invalid resolution.");
         if (resB <= FLT_EPSILON)
@@ -405,8 +435,8 @@ namespace slamware_ros_sdk
         tmpSize *= C_MAP_DATA_SIZE_ALIGNMENT;
         return static_cast<int>(tmpSize);
     }
-
-    utils::RectangleI ServerMapHolder::sfCalcAdjustedCellIdxRect_(const utils::RectangleI &idxRect)
+    
+    utils::RectangleI ServerMapHolder::sfCalcAdjustedCellIdxRect_(const utils::RectangleI& idxRect)
     {
         if (sfIsCellIdxRectEmpty(idxRect))
             return utils::RectangleI();

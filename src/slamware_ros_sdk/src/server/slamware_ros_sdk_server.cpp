@@ -1,30 +1,23 @@
-/**
- * @file slamware_ros_sdk_server.cpp
- * @brief Implementation of the Slamware ROS SDK Server.
- */
-#include "slamware_ros_sdk_server.h"
-
-#include <cassert>
+#include  "slamware_ros_sdk_server.h"
 #include <stdexcept>
 #include <cmath>
-#include <chrono>
-#include <sensor_msgs/Image.h>
-#include <opencv2/opencv.hpp>
+#include <memory>
 #include <cv_bridge/cv_bridge.h>
 
-namespace slamware_ros_sdk
-{
+namespace slamware_ros_sdk {
+
+    using namespace std::placeholders;
     //////////////////////////////////////////////////////////////////////////
 
     SlamwareRosSdkServer::SlamwareRosSdkServer()
-        : state_(ServerStateNotInit),
-          isStopRequested_(false),
-          nh_("~"),
-          relocalization_active_(false),
-          cancel_requested_(false),
-          raw_img_listener_(nullptr)
+        : Node("slamware_ros_sdk_server")
+        , state_(ServerStateNotInit)
+        , isStopRequested_(false)
+        , relocalization_active_(false)
+        , cancel_requested_(false)
+        , raw_img_listener_(nullptr)
     {
-        //
+        tfBrdcstr_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
 
     SlamwareRosSdkServer::~SlamwareRosSdkServer()
@@ -32,10 +25,9 @@ namespace slamware_ros_sdk
         cleanup_();
     }
 
-    bool SlamwareRosSdkServer::startRun(std::string &errMsg)
+    bool SlamwareRosSdkServer::startRun(std::string& errMsg)
     {
         errMsg.clear();
-
         const auto oldState = state_.load();
         if (ServerStateNotInit != oldState && ServerStateStopped != oldState)
         {
@@ -80,8 +72,7 @@ namespace slamware_ros_sdk
             aurora->controller.resyncMapData();
     }
 
-    std::chrono::milliseconds SlamwareRosSdkServer::sfConvFloatSecToBoostMs_(
-        float fSec)
+    std::chrono::milliseconds SlamwareRosSdkServer::sfConvFloatSecToChronoMs_(float fSec)
     {
         if (fSec < 0.0f)
             throw std::runtime_error("invalid float value of seconds.");
@@ -107,20 +98,153 @@ namespace slamware_ros_sdk
         return workDat_;
     }
 
-    bool SlamwareRosSdkServer::init_(std::string & /*errMsg*/)
+    bool SlamwareRosSdkServer::discoverAndSelectAuroraDevice(rp::standalone::aurora::RemoteSDK *sdk, rp::standalone::aurora::SDKServerConnectionDesc &selectedDeviceDesc)
     {
-        params_.resetToDefault();
-        params_.setBy(nh_);
+        std::vector<SDKServerConnectionDesc> serverList;
+        size_t count = sdk->getDiscoveredServers(serverList, 32);
+        if (count == 0)
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "No aurora devices found");
+            return false;
+        }
+
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Found %ld aurora devices", count);
+        for (size_t i = 0; i < count; i++)
+        {
+            RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Device %ld", i);
+            for (size_t j = 0; j < serverList[i].size(); ++j)
+            {
+                auto &connectionOption = serverList[i][j];
+                RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "  option %ld: %s", j, connectionOption.toLocatorString().c_str());
+            }
+        }
+
+        // select the first device
+        selectedDeviceDesc = serverList[0];
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Selected first device: %s", selectedDeviceDesc[0].toLocatorString().c_str());
+        return true;
+    }
+
+
+    void SlamwareRosSdkServer::loopTryConnectToAuroraSdk_()
+    {
+        std::uint32_t tryCnt = 1;
+        while (shouldContinueRunning_())
+        {
+            {
+                RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "try to connect to aurora, tryCnt: %u.", tryCnt);
+                connectAuroraSdk_();
+                if (auroraSdkConnected_.load())
+                {
+                    RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "connect to aurora, OK, tryCnt: %u.", tryCnt);
+                    return;
+                }
+                int iVal = params_.getParameter<int>("reconn_wait_ms");
+                RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "connect to aurora, FAILED, tryCnt: %u, wait %d ms to retry."
+                    , tryCnt, iVal);
+            }
+            int iVal = params_.getParameter<int>("reconn_wait_ms");
+            const std::uint32_t maxSleepMs = (0 <= iVal ? (std::uint32_t)iVal : 0U);
+            roughSleepWait_(maxSleepMs, 100U);
+            ++tryCnt;
+        }
+    }
+
+
+    void SlamwareRosSdkServer::connectAuroraSdk_()
+    {
+        SDKConfig config = SDKConfig();
+        if(params_.getParameter<bool>("no_preview_image"))
+            config.setCreationFlags(SLAMTEC_AURORA_SDK_SESSION_FLAG_NO_PREVIEW_IMAGE_SUBSCRIPTION);
+        if(raw_img_listener_ == nullptr)
+        {
+            raw_img_listener_ = new RawImageListener();
+            raw_img_listener_->Init(this);
+        }
+        
+        auroraSdk_ = rp::standalone::aurora::RemoteSDK::CreateSession(raw_img_listener_,config);
+        if(auroraSdk_ == nullptr)
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "Failed to create aurora sdk session.");
+            return;
+        }
+
+        std::string ip = params_.getParameter<std::string>("ip_address");
+        rp::standalone::aurora::SDKServerConnectionDesc selectedDeviceDesc;
+        const char *connectionString = nullptr;
+        if (!ip.empty())
+        {
+            connectionString = ip.c_str();
+        }
+
+        if (connectionString == nullptr)
+        {
+            RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Device connection string not provided, try to discover aurora devices..." );
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+
+            if (!discoverAndSelectAuroraDevice(auroraSdk_, selectedDeviceDesc))
+            {
+                RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "Failed to discover aurora devices");
+                return;
+            }
+        }
+        else
+        {
+            selectedDeviceDesc = SDKServerConnectionDesc(connectionString);
+            RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Selected device: %s", selectedDeviceDesc[0].toLocatorString().c_str());
+        }
+
+        // connect to the selected device
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Connecting to the selected device...");
+        if (!auroraSdk_->connect(selectedDeviceDesc))
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "Failed to connect to the selected device");
+            return;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "Connected to the selected device");
+        auroraSdk_->controller.setMapDataSyncing(true);
+        LIDAR2DGridMapGenerationOptions genOption;
+        if(!auroraSdk_->lidar2DMapBuilder.startPreviewMapBackgroundUpdate(genOption)) 
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "Failed to start preview map update");
+        }
+        auroraSdkConnected_.store(true);
+        //start raw image stream according to config
+        auroraSdk_->controller.setRawDataSubscription(params_.getParameter<bool>("raw_image_on")); 
+    }
+
+    void SlamwareRosSdkServer::disconnectAuroraSdk_()
+    {
+        if (auroraSdkConnected_.load())
+        {
+            {
+                std::lock_guard<std::mutex> lkGuard(auroraSdkLock_);
+                auroraSdk_->lidar2DMapBuilder.stopPreviewMapBackgroundUpdate();
+                auroraSdk_->disconnect();
+                auroraSdk_->release();
+            }
+            auroraSdkConnected_.store(false);
+        }
+    }   
+
+    bool SlamwareRosSdkServer::init_(std::string& /*errMsg*/)
+    {
+        // params_.resetToDefault();  // TODO:
+        std::string ip = params_.getParameter<std::string>("ip_address");
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "ip:%s", ip.c_str());
+        
         auroraSdkConnected_.store(false);
+        params_.setBy(shared_from_this());
         {
             std::lock_guard<std::mutex> lkGuard(workDatLock_);
             workDat_ = std::make_shared<ServerWorkData>();
         }
 
-        if (!auroraSdkConnected_.load())
+        if(!auroraSdkConnected_.load())
         {
             loopTryConnectToAuroraSdk_();
         }
+
         // init all workers
         {
             serverWorkers_.clear();
@@ -128,123 +252,105 @@ namespace slamware_ros_sdk
             const auto defaultUpdateIntervalForNoneUpdateWorkers = std::chrono::milliseconds(1000u * 60u);
 
             {
-                auto svrWk = std::make_shared<ServerRobotDeviceInfoWorker>(this, "RobotDeviceInfo", defaultUpdateIntervalForNoneUpdateWorkers);
-                serverWorkers_.push_back(svrWk);
-            }
-            {
-                ROS_INFO("Odometry:%.4f", params_.odometry_pub_period);
-                auto svrWk = std::make_shared<ServerOdometryWorker>(this, "Odometry", sfConvFloatSecToBoostMs_(params_.odometry_pub_period));
-                serverWorkers_.push_back(svrWk);
-            }
-            if (0 < params_.robot_pose_pub_period)
-            {
-                ROS_INFO("RobotPose:%.4f", params_.robot_pose_pub_period);
-                auto svrWk = std::make_shared<ServerRobotPoseWorker>(this, "RobotPose", sfConvFloatSecToBoostMs_(params_.robot_pose_pub_period));
+                auto svrWk = std::make_shared<ServerOdometryWorker>(this, "Odometry", sfConvFloatSecToChronoMs_(params_.getParameter<float>("odometry_pub_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
-            if (0 < params_.map_update_period)
+            if (0 < params_.getParameter<float>("robot_pose_pub_period"))
             {
-                ROS_INFO("ExploreMapUpdate:%.4f", params_.map_update_period);
-                auto svrWk = std::make_shared<ServerExploreMapUpdateWorker>(this, "ExploreMapUpdate", sfConvFloatSecToBoostMs_(params_.map_update_period));
+                auto svrWk = std::make_shared<ServerRobotPoseWorker>(this, "RobotPose", sfConvFloatSecToChronoMs_(params_.getParameter<float>("robot_pose_pub_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
-            if (0 < params_.map_pub_period)
+            if (0 < params_.getParameter<float>("map_update_period"))
             {
-                ROS_INFO("ExploreMapPublish:%.4f", params_.map_pub_period);
-                auto svrWk = std::make_shared<ServerExploreMapPublishWorker>(this, "ExploreMapPublish", sfConvFloatSecToBoostMs_(params_.map_pub_period));
+                auto svrWk = std::make_shared<ServerExploreMapUpdateWorker>(this, "ExploreMapUpdate", sfConvFloatSecToChronoMs_(params_.getParameter<float>("map_update_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
-            if (0 < params_.scan_pub_period)
+            if (0 < params_.getParameter<float>("map_pub_period"))
             {
-                ROS_INFO("LaserScan:%.4f", params_.scan_pub_period);
-                auto svrWk = std::make_shared<ServerLaserScanWorker>(this, "LaserScan", sfConvFloatSecToBoostMs_(params_.scan_pub_period));
+                auto svrWk = std::make_shared<ServerExploreMapPublishWorker>(this, "ExploreMapPublish", sfConvFloatSecToChronoMs_(params_.getParameter<float>("map_pub_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
-            if (0 < params_.imu_raw_data_period)
+            if (0 < params_.getParameter<float>("scan_pub_period"))
             {
-                ROS_INFO("ServerImuRawDataWorker:%.4f", params_.imu_raw_data_period);
-                auto svrWk = std::make_shared<ServerImuRawDataWorker>(this, "ServerImuRawDataWorker", sfConvFloatSecToBoostMs_(params_.imu_raw_data_period));
+                auto svrWk = std::make_shared<ServerLaserScanWorker>(this, "LaserScan", sfConvFloatSecToChronoMs_(params_.getParameter<float>("scan_pub_period")));
                 serverWorkers_.push_back(svrWk);
             }
-            /*new */
             {
-                ROS_INFO("RosConnectWorker:%.4f", params_.robot_basic_state_pub_period);
-                auto svrWk = std::make_shared<RosConnectWorker>(this, "RosConnectWorker", sfConvFloatSecToBoostMs_(params_.robot_basic_state_pub_period));
+                auto svrWk = std::make_shared<ServerImuRawDataWorker>(this, "ServerImuRawDataWorker", sfConvFloatSecToChronoMs_(params_.getParameter<float>("imu_raw_data_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
             {
-                ROS_INFO("SystemStatus:%.4f", params_.system_status_pub_period);
+                auto svrWk = std::make_shared<RosConnectWorker>(this, "RosConnectWorker", sfConvFloatSecToChronoMs_(params_.getParameter<float>("robot_basic_state_pub_period")));
+               serverWorkers_.push_back(svrWk);
+            }
+
+            {
                 // add ServerSystemStatusWorker
-                auto svrWk = std::make_shared<ServerSystemStatusWorker>(this, "SystemStatus", sfConvFloatSecToBoostMs_(params_.system_status_pub_period));
+                auto svrWk = std::make_shared<ServerSystemStatusWorker>(this, "SystemStatus", sfConvFloatSecToChronoMs_(params_.getParameter<float>("system_status_pub_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
             {
-                ROS_INFO("StereoImage:%.4f", params_.stereo_image_pub_period);
-                // add ServerStereoImageWorker
-                auto svrWk = std::make_shared<ServerStereoImageWorker>(this, "StereoImage", sfConvFloatSecToBoostMs_(params_.stereo_image_pub_period));
+                //add ServerStereoImageWorker
+                auto svrWk = std::make_shared<ServerStereoImageWorker>(this, "StereoImage", sfConvFloatSecToChronoMs_(params_.getParameter<float>("stereo_image_pub_period")));
                 serverWorkers_.push_back(svrWk);
             }
 
             {
-                // Add ServerEnhancedImagingWorker
-                auto svrWk = std::make_shared<ServerEnhancedImagingWorker>(this, "EnhancedImaging", sfConvFloatSecToBoostMs_(params_.enhanced_imaging_pub_period));
+                //add ServerEnhancedImagingWorker
+                auto svrWk = std::make_shared<ServerEnhancedImagingWorker>(this, "EnhancedImaging", sfConvFloatSecToChronoMs_(params_.getParameter<float>("enhanced_imaging_pub_period")));
                 serverWorkers_.push_back(svrWk);
-               
             }
 
             {
-                ROS_INFO("PointCloud:%.4f", params_.point_cloud_pub_period);
-                // add ServerPointCloudWorker
-                auto svrWk = std::make_shared<ServerPointCloudWorker>(this, "PointCloud", sfConvFloatSecToBoostMs_(params_.point_cloud_pub_period));
+                //add ServerPointCloudWorker
+                auto svrWk = std::make_shared<ServerPointCloudWorker>(this, "PointCloud", sfConvFloatSecToChronoMs_(params_.getParameter<float>("point_cloud_pub_period")));   
                 serverWorkers_.push_back(svrWk);
             }
-                     /**/
         }
 
         // init all subscriptions
         {
-            subSyncMap_ = nh_.subscribe<slamware_ros_sdk::SyncMapRequest>(
-                "sync_map", 1,
-                &SlamwareRosSdkServer::msgCbSyncMap_, this);
+            subSyncMap_ = this->create_subscription<slamware_ros_sdk::msg::SyncMapRequest>(
+                "/slamware_ros_sdk_server_node/sync_map", 1,
+                std::bind(&SlamwareRosSdkServer::msgCbSyncMap_, this, std::placeholders::_1));
 
-            subClearMap_ = nh_.subscribe<slamware_ros_sdk::ClearMapRequest>(
-                "clear_map", 1,
-                &SlamwareRosSdkServer::msgCbClearMap_, this);
+            subClearMap_ = this->create_subscription<slamware_ros_sdk::msg::ClearMapRequest>(
+                "/slamware_ros_sdk_server_node/clear_map", 1,
+                std::bind(&SlamwareRosSdkServer::msgCbClearMap_, this, std::placeholders::_1));
 
-            subSetMapUpdate_ = nh_.subscribe<slamware_ros_sdk::SetMapUpdateRequest>(
-                "set_map_update", 1,
-                &SlamwareRosSdkServer::msgCbSetMapUpdate_, this);
+            subSetMapUpdate_ = this->create_subscription<slamware_ros_sdk::msg::SetMapUpdateRequest>(
+                "/slamware_ros_sdk_server_node/set_map_update", 1,
+                std::bind(&SlamwareRosSdkServer::msgCbSetMapUpdate_, this, std::placeholders::_1));
 
-            subSetMapLocalization_ = nh_.subscribe<slamware_ros_sdk::SetMapLocalizationRequest>(
-                "set_map_localization", 1,
-                &SlamwareRosSdkServer::msgCbSetMapLocalization_, this);
+            subSetMapLocalization_ = this->create_subscription<slamware_ros_sdk::msg::SetMapLocalizationRequest>(
+                "/slamware_ros_sdk_server_node/set_map_localization", 1,
+                std::bind(&SlamwareRosSdkServer::msgCbSetMapLocalization_, this, std::placeholders::_1));
 
-            subRelocalizationCancel_ = nh_.subscribe<slamware_ros_sdk::RelocalizationCancelRequest>(
-                "relocalization/cancel", 1,
-                &SlamwareRosSdkServer::msgCbRelocalizationCancel_, this);
+            subRelocalizationCancel_ = this->create_subscription<slamware_ros_sdk::msg::RelocalizationCancelRequest>(
+                "/slamware_ros_sdk_server_node/relocalization/cancel", 1,
+                std::bind(&SlamwareRosSdkServer::msgCbRelocalizationCancel_, this, std::placeholders::_1));
         }
 
         // init all services
         {
-            srvSyncGetStcm_ = nh_.advertiseService(
-                "sync_get_stcm",
-                &SlamwareRosSdkServer::srvCbSyncGetStcm_, this);
+            srvSyncGetStcm_ = this->create_service<slamware_ros_sdk::srv::SyncGetStcm>(
+                "/slamware_ros_sdk_server_node/sync_get_stcm",
+                std::bind(&SlamwareRosSdkServer::srvCbSyncGetStcm_, this, std::placeholders::_1, std::placeholders::_2));
 
-            srvSyncSetStcm_ = nh_.advertiseService(
-                "sync_set_stcm",
-                &SlamwareRosSdkServer::srvCbSyncSetStcm_, this);
+            srvSyncSetStcm_ = this->create_service<slamware_ros_sdk::srv::SyncSetStcm>(
+                "/slamware_ros_sdk_server_node/sync_set_stcm",
+                std::bind(&SlamwareRosSdkServer::srvCbSyncSetStcm_, this, std::placeholders::_1, std::placeholders::_2));
 
-            relocalization_request_srv_ = nh_.advertiseService(
-                "relocalization",
-                &SlamwareRosSdkServer::srvCbRelocalizationRequest_, this);
+            relocalization_request_srv_ = this->create_service<slamware_ros_sdk::srv::RelocalizationRequest>(
+                "/slamware_ros_sdk_server_node/relocalization",
+                std::bind(&SlamwareRosSdkServer::srvCbRelocalizationRequest_, this, std::placeholders::_1, std::placeholders::_2));
         }
-
         return true;
     }
 
@@ -254,22 +360,7 @@ namespace slamware_ros_sdk
             requestStop();
         waitUntilStopped();
 
-        // de-init all services
-        {
-            srvSyncGetStcm_ = ros::ServiceServer();
-            srvSyncSetStcm_ = ros::ServiceServer();
-            relocalization_request_srv_ = ros::ServiceServer();
-        }
-
-        // de-init all subscriptions
-        {
-            subSyncMap_ = ros::Subscriber();
-            subClearMap_ = ros::Subscriber();
-
-            subSetMapUpdate_ = ros::Subscriber();
-            subSetMapLocalization_ = ros::Subscriber();
-            subRelocalizationCancel_ = ros::Subscriber();
-        }
+        disconnectAuroraSdk_();
 
         // de-init all publishers
         {
@@ -280,7 +371,7 @@ namespace slamware_ros_sdk
             std::lock_guard<std::mutex> lkGuard(workDatLock_);
             workDat_.reset();
         }
-        if(raw_img_listener_)
+        if(raw_img_listener_ != nullptr)
             delete raw_img_listener_;
         state_.store(ServerStateNotInit);
     }
@@ -288,11 +379,13 @@ namespace slamware_ros_sdk
     void SlamwareRosSdkServer::workThreadFun_()
     {
         assert(ServerStateRunning == state_.load());
-        ROS_INFO("SlamwareRosSdkServer, work thread begin.");
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "SlamwareRosSdkServer, work thread begin.");
 
-        while (shouldContinueRunning_() && ros::ok())
+        while (shouldContinueRunning_()
+            && rclcpp::ok() // ros::ok()
+            )
         {
-            if (!auroraSdkConnected_.load())
+            if(!auroraSdkConnected_.load())
             {
                 loopTryConnectToAuroraSdk_();
                 if (!auroraSdkConnected_.load())
@@ -303,58 +396,59 @@ namespace slamware_ros_sdk
             {
                 loopWork_();
             }
-            catch (const std::exception &excp)
+            catch (const std::exception& excp)
             {
-                ROS_FATAL("loopWork_(), exception: %s.", excp.what());
+                RCLCPP_FATAL(rclcpp::get_logger("slamware ros sdk server"), "loopWork_(), exception: %s.", excp.what());
             }
             catch (...)
             {
-                ROS_FATAL("loopWork_(), unknown exception.");
+                RCLCPP_FATAL(rclcpp::get_logger("slamware ros sdk server"), "loopWork_(), unknown exception.");
             }
-
+            
             disconnectAuroraSdk_();
 
             if (shouldContinueRunning_())
             {
                 const std::uint32_t maxSleepMs = (1000u * 3u);
-                ROS_INFO("wait %u ms to reconnect and restart work loop.", maxSleepMs);
+                RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "wait %u ms to reconnect and restart work loop.", maxSleepMs);
                 roughSleepWait_(maxSleepMs, 100U);
             }
         }
 
-        ROS_INFO("SlamwareRosSdkServer, work thread end.");
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "SlamwareRosSdkServer, work thread end.");
         state_.store(ServerStateStopped);
     }
 
-    void SlamwareRosSdkServer::roughSleepWait_(
-        std::uint32_t maxSleepMs, std::uint32_t onceSleepMs)
+    void SlamwareRosSdkServer::roughSleepWait_(std::uint32_t maxSleepMs, std::uint32_t onceSleepMs)
     {
         const auto durOnceSleep = std::chrono::milliseconds(onceSleepMs);
         auto tpNow = std::chrono::steady_clock::now();
         const auto maxSleepTimepoint = tpNow + std::chrono::milliseconds(maxSleepMs);
-        while (shouldContinueRunning_() && tpNow < maxSleepTimepoint)
+        while (shouldContinueRunning_()
+            && tpNow < maxSleepTimepoint
+            )
         {
             std::this_thread::sleep_for(durOnceSleep);
             tpNow = std::chrono::steady_clock::now();
         }
     }
-
+   
     bool SlamwareRosSdkServer::reinitWorkLoop_()
     {
         const std::uint32_t cntWorkers = static_cast<std::uint32_t>(serverWorkers_.size());
 
-        ROS_INFO("reset all %u workers on work loop begin.", cntWorkers);
+        RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "reset all %u workers on work loop begin.", cntWorkers);
         for (auto it = serverWorkers_.begin(), itEnd = serverWorkers_.end(); itEnd != it; ++it)
         {
-            const auto &svrWk = (*it);
+            const auto& svrWk = (*it);
             const auto wkName = svrWk->getWorkerName();
             try
             {
                 svrWk->resetOnWorkLoopBegin();
             }
-            catch (const std::exception &excp)
+            catch (const std::exception& excp)
             {
-                ROS_ERROR("worker: %s, resetOnWorkLoopBegin(), exception: %s.", wkName.c_str(), excp.what());
+                RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "worker: %s, resetOnWorkLoopBegin(), exception: %s.", wkName.c_str(), excp.what());
                 return false;
             }
         }
@@ -366,7 +460,7 @@ namespace slamware_ros_sdk
             std::uint32_t cntOk = 0;
             for (auto it = serverWorkers_.begin(), itEnd = serverWorkers_.end(); itEnd != it; ++it)
             {
-                const auto &svrWk = (*it);
+                const auto& svrWk = (*it);
                 const auto wkName = svrWk->getWorkerName();
                 try
                 {
@@ -379,31 +473,32 @@ namespace slamware_ros_sdk
                         if (svrWk->reinitWorkLoop())
                             ++cntOk;
                         else
-                            ROS_WARN("failed to init work loop, worker: %s.", wkName.c_str());
+                            RCLCPP_WARN(rclcpp::get_logger("slamware ros sdk server"), "failed to init work loop, woker: %s.", wkName.c_str());
                     }
                 }
-                catch (const std::exception &excp)
+                catch (const std::exception& excp)
                 {
-                    ROS_ERROR("worker: %s, reinitWorkLoop(), exception: %s.", wkName.c_str(), excp.what());
+                    RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "worker: %s, reinitWorkLoop(), exception: %s.", wkName.c_str(), excp.what());
                 }
                 catch (...)
                 {
-                    ROS_ERROR("worker: %s, reinitWorkLoop(), unknown exception.", wkName.c_str());
+                    RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "worker: %s, reinitWorkLoop(), unknown exception.", wkName.c_str());
                 }
+
             }
-            // check if all workers are ok.
+            // check if all workers are ok.            
             if (cntWorkers == cntOk)
             {
                 return true;
             }
             else if (t < maxLoopTryCnt)
             {
-                ROS_WARN("(%u / %u) cntWorkers: %u, cntOk: %u, wait %u ms to retry.", t, maxLoopTryCnt, cntWorkers, cntOk, maxSleepMs);
+                RCLCPP_WARN(rclcpp::get_logger("slamware ros sdk server"), "(%u / %u) cntWorkers: %u, cntOk: %u, wait %u ms to retry.", t, maxLoopTryCnt, cntWorkers, cntOk, maxSleepMs);
                 roughSleepWait_(maxSleepMs, 100U);
             }
             else
             {
-                ROS_WARN("(%u / %u) cntWorkers: %u, cntOk: %u.", t, maxLoopTryCnt, cntWorkers, cntOk);
+                RCLCPP_WARN(rclcpp::get_logger("slamware ros sdk server"), "(%u / %u) cntWorkers: %u, cntOk: %u.", t, maxLoopTryCnt, cntWorkers, cntOk);
             }
         }
         return false;
@@ -411,14 +506,13 @@ namespace slamware_ros_sdk
 
     void SlamwareRosSdkServer::loopWork_()
     {
-
         if (reinitWorkLoop_())
         {
-            ROS_INFO("successed to reinit all workers on work loop begin.");
+            RCLCPP_INFO(rclcpp::get_logger("slamware ros sdk server"), "successed to reinit all workers on work loop begin.");
         }
         else
         {
-            ROS_ERROR("failed or cancelled to reinit work loop.");
+            RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "failed or cancelled to reinit work loop.");
             return;
         }
 
@@ -428,31 +522,25 @@ namespace slamware_ros_sdk
 
             for (auto it = serverWorkers_.begin(), itEnd = serverWorkers_.end(); itEnd != it; ++it)
             {
-                const auto &svrWk = (*it);
+                const auto& svrWk = (*it);
                 const auto wkName = svrWk->getWorkerName();
                 bool shouldReconnect = false;
                 try
                 {
-                    auto tpStart = std::chrono::steady_clock::now();
                     svrWk->checkToPerform();
-                    auto tpEnd = std::chrono::steady_clock::now();
-                    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(tpEnd - tpStart).count();
-                    if (ts > 100)
-                        ROS_INFO("worker(%s) time cost: %ld", wkName.c_str(), ts);
                 }
-
-                catch (const std::exception &excp)
+                catch (const std::exception& excp)
                 {
-                    ROS_ERROR("worker name: %s, exception: %s.", wkName.c_str(), excp.what());
+                    RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "worker name: %s, exception: %s.", wkName.c_str(), excp.what());
                 }
                 catch (...)
                 {
-                    ROS_ERROR("worker name: %s, unknown exception.", wkName.c_str());
+                    RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "worker name: %s, unknown exception.", wkName.c_str());
                 }
 
                 if (shouldReconnect)
                 {
-                    ROS_ERROR("it should reconnect to slamware.");
+                    RCLCPP_ERROR(rclcpp::get_logger("slamware ros sdk server"), "it should reconnect to slamware.");
                     return;
                 }
 
@@ -471,48 +559,50 @@ namespace slamware_ros_sdk
     }
 
     //////////////////////////////////////////////////////////////////////////
-
-    template <class MsgT>
-    ros::Subscriber SlamwareRosSdkServer::subscribe_T_(const std::string &msgTopic, std::uint32_t queueSize, typename msg_cb_help_t<MsgT>::msg_cb_perform_fun_t mfpCbPerform)
+    void SlamwareRosSdkServer::msgCbSyncMap_(const slamware_ros_sdk::msg::SyncMapRequest::SharedPtr /*msg*/)
     {
-        typedef msg_cb_help_t<MsgT> TheMsgCbHelpT;
-
-        typename TheMsgCbHelpT::ros_cb_fun_t rosCbFun(
-            std::bind(&SlamwareRosSdkServer::msgCbWrapperFun_T_<MsgT>, this, mfpCbPerform, msgTopic, _1));
-        return nh_.subscribe(msgTopic, queueSize, rosCbFun);
-    }
-
-    void SlamwareRosSdkServer::msgCbSyncMap_(
-        const SyncMapRequest::ConstPtr & /*msg*/)
-    {
+        RCLCPP_INFO(this->get_logger(), "Received sync map request");
         requestSyncMap();
     }
 
-    void SlamwareRosSdkServer::msgCbClearMap_(
-        const ClearMapRequest::ConstPtr &msg)
+    void SlamwareRosSdkServer::msgCbClearMap_(const slamware_ros_sdk::msg::ClearMapRequest::SharedPtr /*msg*/)
     {
+        RCLCPP_INFO(this->get_logger(), "Received clear map request");
         auto aurora = safeGetAuroraSdk();
         aurora->controller.requireMapReset();
     }
 
-    void SlamwareRosSdkServer::msgCbSetMapUpdate_(
-        const SetMapUpdateRequest::ConstPtr &msg)
+    void SlamwareRosSdkServer::msgCbSetMapUpdate_(const slamware_ros_sdk::msg::SetMapUpdateRequest::SharedPtr /*msg*/)
     {
+        RCLCPP_INFO(this->get_logger(), "Received set map update request");
         auto aurora = safeGetAuroraSdk();
         aurora->controller.requireMappingMode();
     }
 
-    void SlamwareRosSdkServer::msgCbSetMapLocalization_(
-        const SetMapLocalizationRequest::ConstPtr &msg)
+    void SlamwareRosSdkServer::msgCbSetMapLocalization_(const slamware_ros_sdk::msg::SetMapLocalizationRequest::SharedPtr /*msg*/)
     {
+        RCLCPP_INFO(this->get_logger(), "Received set map localization request");
         auto aurora = safeGetAuroraSdk();
         aurora->controller.requirePureLocalizationMode();
     }
 
-    bool SlamwareRosSdkServer::srvCbSyncGetStcm_(
-        SyncGetStcm::Request &req, SyncGetStcm::Response &resp)
+    void SlamwareRosSdkServer::msgCbRelocalizationCancel_(const slamware_ros_sdk::msg::RelocalizationCancelRequest::SharedPtr /*msg*/)
     {
-        const char *mapfile = req.mapfile.c_str();
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Relocalization cancel requested");
+
+        auto aurora = safeGetAuroraSdk();
+        if (!aurora->controller.cancelRelocalization()) {
+            RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to cancel relocalization");
+            return;
+        }
+        cancel_requested_.store(true);
+        relocalization_active_.store(false);
+    }
+
+    //////////////////////////////////////////////////////////////////////////
+    bool SlamwareRosSdkServer::srvCbSyncGetStcm_(slamware_ros_sdk::srv::SyncGetStcm::Request::SharedPtr req, slamware_ros_sdk::srv::SyncGetStcm::Response::SharedPtr resp)
+    {
+        const char *mapfile = req->mapfile.c_str();     
         auto aurora = safeGetAuroraSdk();
         std::promise<int> resultPromise;
         auto resultFuture = resultPromise.get_future();
@@ -525,9 +615,9 @@ namespace slamware_ros_sdk
 
         if (!aurora->mapManager.startDownloadSession(mapfile, resultCallback, &resultPromise))
         {
-            ROS_ERROR("Failed to start map storage session");
-            resp.success = false;
-            resp.message = "Failed to start map storage session";
+            RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to start map storage session");
+            resp->success = false;
+            resp->message = "Failed to start map storage session";
             return false;
         }
 
@@ -536,33 +626,32 @@ namespace slamware_ros_sdk
             slamtec_aurora_sdk_mapstorage_session_status_t status;
             if (!aurora->mapManager.querySessionStatus(status))
             {
-                ROS_ERROR("Failed to query storage status");
-                resp.success = false;
-                resp.message = "Failed to query storage status";
+                RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to query storage status");
+                resp->success = false;
+                resp->message = "Failed to query storage status";
                 return false;
             }
 
-            ROS_INFO("Map download progress: %f", status.progress);
-            ros::Duration(0.1).sleep();
+            RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Map download progress: %f", status.progress);
+            std::this_thread::yield();
         }
 
         int result = resultFuture.get();
         if (result == 0)
         {
-            ROS_ERROR("Failed to save map");
-            resp.success = false;
-            resp.message = "Failed to save map";
+            RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to save map");
+            resp->success = false;
+            resp->message = "Failed to save map";
             return false;
         }
 
-        ROS_INFO("Map saved successfully");
-        resp.success = true;
-        resp.message = "Map saved successfully";
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Map saved successfully");
+        resp->success = true;
+        resp->message = "Map saved successfully";
         return true;
     }
 
-    bool SlamwareRosSdkServer::srvCbSyncSetStcm_(
-        SyncSetStcm::Request &req, SyncSetStcm::Response &resp)
+    bool SlamwareRosSdkServer::srvCbSyncSetStcm_(slamware_ros_sdk::srv::SyncSetStcm::Request::SharedPtr req, slamware_ros_sdk::srv::SyncSetStcm::Response::SharedPtr resp)
     {
         auto aurora = safeGetAuroraSdk();
         {
@@ -574,14 +663,12 @@ namespace slamware_ros_sdk
                 auto promise = reinterpret_cast<std::promise<bool> *>(userData);
                 promise->set_value(isOK != 0);
             };
-
-            ROS_INFO("Starting map upload: %s", req.mapfile.c_str());
-
-            if (!aurora->mapManager.startUploadSession(req.mapfile.c_str(), resultCallback, &resultPromise))
+            RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Starting map upload %s", req->mapfile.c_str());
+            if (!aurora->mapManager.startUploadSession(req->mapfile.c_str(), resultCallback, &resultPromise))
             {
-                ROS_ERROR("Failed to start map upload session");
-                resp.success = false;
-                resp.message = "Failed to start map upload session";
+                RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to start map upload session");
+                resp->success = false;
+                resp->message = "Failed to start map upload session";
                 return false;
             }
 
@@ -590,211 +677,52 @@ namespace slamware_ros_sdk
                 slamtec_aurora_sdk_mapstorage_session_status_t status;
                 if (!aurora->mapManager.querySessionStatus(status))
                 {
-                    ROS_ERROR("Failed to query upload status");
-                    resp.success = false;
-                    resp.message = "Failed to query upload status";
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to query upload status");
+                    resp->success = false;
+                    resp->message = "Failed to query upload status";
                     return false;
                 }
 
-                ROS_INFO("Map upload progress: %f", status.progress);
-                ros::Duration(0.1).sleep();
+                RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Map upload progress: %f", status.progress);
+                std::this_thread::yield();
             }
 
             int result = resultFuture.get();
             if (result == 0)
             {
-                ROS_ERROR("Failed to upload map");
-                resp.success = false;
-                resp.message = "Failed to upload map";
+                RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to upload map");
+                resp->success = false;
+                resp->message = "Failed to upload map";
                 return false;
             }
 
-            ROS_INFO("Map uploaded successfully");
-            resp.success = true;
-            resp.message = "Map uploaded successfully";
+            RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Map uploaded successfully");
+            resp->success = true;
+            resp->message = "Map uploaded successfully";
         }
-
         requestSyncMap();
-        aurora->controller.requireMappingMode();
-
         return true;
     }
 
-    bool SlamwareRosSdkServer::discoverAndSelectAuroraDevice(rp::standalone::aurora::RemoteSDK *sdk, rp::standalone::aurora::SDKServerConnectionDesc &selectedDeviceDesc)
+    //////////////////////////////////////////////////////////////////////////
+    bool SlamwareRosSdkServer::srvCbRelocalizationRequest_(slamware_ros_sdk::srv::RelocalizationRequest::Request::SharedPtr req,
+                                                           slamware_ros_sdk::srv::RelocalizationRequest::Response::SharedPtr resp)
     {
-        std::vector<rp::standalone::aurora::SDKServerConnectionDesc> serverList;
-        size_t count = sdk->getDiscoveredServers(serverList, 32);
-        if (count == 0)
+        if(relocalization_active_.load())
         {
-            ROS_ERROR("No aurora devices found");
-            return false;
-        }
-
-        ROS_INFO("Found %zu aurora devices", count);
-        for (size_t i = 0; i < count; i++)
-        {
-            ROS_INFO("Device %zu", i);
-            for (size_t j = 0; j < serverList[i].size(); ++j)
-            {
-                auto &connectionOption = serverList[i][j];
-                ROS_INFO("  option %zu: %s", j, connectionOption.toLocatorString().c_str());
-            }
-        }
-
-        // Select the first device
-        selectedDeviceDesc = serverList[0];
-        ROS_INFO("Selected first device: %s", selectedDeviceDesc[0].toLocatorString().c_str());
-        return true;
-    }
-
-    void SlamwareRosSdkServer::loopTryConnectToAuroraSdk_()
-    {
-        std::uint32_t tryCnt = 1;
-        while (shouldContinueRunning_())
-        {
-            {
-                ROS_INFO("Trying to connect to Aurora, tryCnt: %u.", tryCnt);
-                connectAuroraSdk_();
-                if (auroraSdkConnected_.load())
-                {
-                    ROS_INFO("Connected to Aurora, OK, tryCnt: %u.", tryCnt);
-                    return;
-                }
-
-                int reconnWaitMs;
-                if (!nh_.getParam("reconn_wait_ms", reconnWaitMs))
-                {
-                    reconnWaitMs = 3000; // default value
-                }
-                ROS_ERROR("Failed to connect to Aurora, tryCnt: %u, waiting %d ms to retry.", tryCnt, reconnWaitMs);
-            }
-
-            int reconnWaitMs;
-            nh_.getParam("reconn_wait_ms", reconnWaitMs);
-            const std::uint32_t maxSleepMs = (0 <= reconnWaitMs ? (std::uint32_t)reconnWaitMs : 0U);
-            roughSleepWait_(maxSleepMs, 100U);
-            ++tryCnt;
-        }
-    }
-
-    void SlamwareRosSdkServer::connectAuroraSdk_()
-    {
-        SDKConfig config = SDKConfig();
-        if(params_.no_preview_image)
-            config.setCreationFlags(SLAMTEC_AURORA_SDK_SESSION_FLAG_NO_PREVIEW_IMAGE_SUBSCRIPTION);
-        if(raw_img_listener_ == nullptr)
-        {
-            raw_img_listener_= new RawImageListener();
-            raw_img_listener_->Init(this);
-        }    
-        auroraSdk_ = rp::standalone::aurora::RemoteSDK::CreateSession(raw_img_listener_,config);
-        if (auroraSdk_ == nullptr)
-        {
-            ROS_ERROR("Failed to create Aurora SDK session.");
-            return;
-        }
-
-        std::string ip;
-        int port;
-        if (!nh_.getParam("ip_address", ip))
-        {
-            ip = "127.0.0.1"; // default IP
-        }
-        if (!nh_.getParam("robot_port", port))
-        {
-            port = 1445; // default port
-        }
-
-        rp::standalone::aurora::SDKServerConnectionDesc selectedDeviceDesc;
-        const char *connectionString = !ip.empty() ? ip.c_str() : nullptr;
-
-        if (connectionString == nullptr)
-        {
-            ROS_INFO("Device connection string not provided, trying to discover Aurora devices...");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-
-            if (!discoverAndSelectAuroraDevice(auroraSdk_, selectedDeviceDesc))
-            {
-                ROS_ERROR("Failed to discover Aurora devices");
-                return;
-            }
-        }
-        else
-        {
-            selectedDeviceDesc = rp::standalone::aurora::SDKServerConnectionDesc(connectionString);
-            ROS_INFO("Selected device: %s", selectedDeviceDesc[0].toLocatorString().c_str());
-        }
-
-        // Connect to the selected device
-        ROS_INFO("Connecting to the selected device...");
-        if (!auroraSdk_->connect(selectedDeviceDesc))
-        {
-            ROS_ERROR("Failed to connect to the selected device");
-            return;
-        }
-        ROS_INFO("Connected to the selected device");
-        auroraSdk_->controller.setMapDataSyncing(true);
-        auroraSdkConnected_.store(true);
-
-        LIDAR2DGridMapGenerationOptions genOption;
-        if (!auroraSdk_->lidar2DMapBuilder.startPreviewMapBackgroundUpdate(genOption))
-        {
-            ROS_ERROR("Failed to start preview map update");
-        }
-        auroraSdkConnected_.store(true);
-        //start raw image stream according to config
-        auroraSdk_->controller.setRawDataSubscription(params_.raw_image_on); 
-    }
-
-    void SlamwareRosSdkServer::disconnectAuroraSdk_()
-    {
-        if (auroraSdkConnected_.load())
-        {
-            {
-                std::lock_guard<std::mutex> lkGuard(auroraSdkLock_);
-                auroraSdk_->lidar2DMapBuilder.stopPreviewMapBackgroundUpdate();
-                auroraSdk_->disconnect();
-                auroraSdk_->release();
-            }
-            auroraSdkConnected_.store(false);
-        }
-    }
-
-    void SlamwareRosSdkServer::msgCbRelocalizationCancel_(
-        const RelocalizationCancelRequest::ConstPtr &msg)
-    {
-        // Handle relocalization cancel using Aurora SDK
-        auto aurora = safeGetAuroraSdk();
-        if (!aurora->controller.cancelRelocalization())
-        {
-            ROS_ERROR("Failed to cancel relocalization");
-            return;
-        }
-        ROS_INFO("Relocalization cancel requested");
-
-        cancel_requested_.store(true);
-        relocalization_active_.store(false);
-    }
-
-    bool SlamwareRosSdkServer::srvCbRelocalizationRequest_(
-        slamware_ros_sdk::RelocalizationRequest::Request &req,
-        slamware_ros_sdk::RelocalizationRequest::Response &resp)
-    {
-        if (relocalization_active_.load())
-        {
-            ROS_INFO("Relocalization already in progress");
-            resp.success = false;
+            RCLCPP_ERROR(this->get_logger(), "Relocalization already in progress");
+            resp->success = false;
             return false;
         }
         // Handle relocalization request using Aurora SDK
         auto aurora = safeGetAuroraSdk();
         aurora->controller.requireRelocalization();
-        ROS_INFO("Relocalization requested");
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Relocalization requested");
         relocalization_active_.store(true);
         cancel_requested_.store(false);
 
-        relocalization_future_ = std::async(std::launch::async, [this]()
-                                            {
+
+        relocalization_future_ = std::async(std::launch::async, [this]() {
             while (true)
             {
                 checkRelocalizationStatus();
@@ -803,9 +731,10 @@ namespace slamware_ros_sdk
                     return;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            } });
+            }
+        });
 
-        resp.success = true;
+        resp->success = true;
         return true;
     }
 
@@ -823,12 +752,12 @@ namespace slamware_ros_sdk
 
         if (last_status == SLAMTEC_AURORA_SDK_DEVICE_RELOCALIZATION_STATUS_SUCCEED)
         {
-            ROS_INFO("Relocalization succeeded");
+            RCLCPP_INFO(this->get_logger(), "Relocalization succeeded");
             relocalization_active_.store(false);
         }
         else if (last_status == SLAMTEC_AURORA_SDK_DEVICE_RELOCALIZATION_STATUS_FAILED)
         {
-            ROS_INFO("Relocalization failed");
+            RCLCPP_ERROR(this->get_logger(), "Relocalization failed");
             relocalization_active_.store(false);
         }
         else if (last_status == SLAMTEC_AURORA_SDK_DEVICE_RELOCALIZATION_STATUS_IN_PROGRESS
@@ -837,14 +766,13 @@ namespace slamware_ros_sdk
             // still waiting; keep background loop running
         }
     }
-
+    
     void RawImageListener::Init(SlamwareRosSdkServer* ros_sdk_server){
-        auto srvParams = ros_sdk_server->serverParams_();
-        auto nhRos = ros_sdk_server->rosNodeHandle_();
-        pubLeftRawImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.left_image_raw_topic_name, 5);
-        pubRightRawImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.right_image_raw_topic_name, 5); 
-        CameraFrameLeftId = srvParams.camera_left;
-        CameraFrameRightId = srvParams.camera_right;
+        auto& srvParams = ros_sdk_server->serverParams_();
+        pubLeftRawImage_ = ros_sdk_server->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("left_image_raw_topic_name"), 5);
+        pubRightRawImage_ = ros_sdk_server->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("right_image_raw_topic_name"), 5); 
+        CameraFrameLeftId = srvParams.getParameter<std::string>("camera_left");
+        CameraFrameRightId = srvParams.getParameter<std::string>("camera_right");
            
 
     }
@@ -861,14 +789,14 @@ namespace slamware_ros_sdk
                 cv::cvtColor(rawFrameL, rawFrameL, cv::COLOR_GRAY2RGB);
             else
                 return;
-            std_msgs::Header header_left;
+            std_msgs::msg::Header header_left;
             cv_bridge::CvImage img_bridge_left;
             header_left.frame_id = CameraFrameLeftId;
-            header_left.stamp = ros::Time::now();
+            header_left.stamp = rclcpp::Clock().now();
             img_bridge_left = cv_bridge::CvImage(header_left, sensor_msgs::image_encodings::RGB8, rawFrameL);
-            sensor_msgs::Image leftImage;
+            sensor_msgs::msg::Image leftImage;
             img_bridge_left.toImageMsg(leftImage);
-            pubLeftRawImage_.publish(leftImage);
+            pubLeftRawImage_->publish(leftImage);
                 
         }
         if(!rawFrameR.empty())
@@ -879,16 +807,16 @@ namespace slamware_ros_sdk
                 cv::cvtColor(rawFrameR, rawFrameR, cv::COLOR_GRAY2RGB);
             else
                 return;
-            std_msgs::Header header_right;
+            std_msgs::msg::Header header_right;
             cv_bridge::CvImage img_bridge_right;
             header_right.frame_id = CameraFrameRightId;
-            header_right.stamp = ros::Time::now();
+            header_right.stamp = rclcpp::Clock().now();
             img_bridge_right = cv_bridge::CvImage(header_right, sensor_msgs::image_encodings::RGB8, rawFrameR);
-            sensor_msgs::Image rightImage;
+            sensor_msgs::msg::Image rightImage;
             img_bridge_right.toImageMsg(rightImage);
-            pubRightRawImage_.publish(rightImage);
+            pubRightRawImage_->publish(rightImage);
         }
 
     }
-    
+
 }

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.5)
 project(slamware_ros_sdk)
 
 # Default to C++17
@@ -6,20 +6,9 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 
-# Default to C99
-if(NOT CMAKE_C_STANDARD)
-  set(CMAKE_C_STANDARD 99)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
-
-#Define Color
-string(ASCII 27 Esc) 
-set(Red "${Esc}[31m")
-set(Green "${Esc}[32m")
-set(Yellow "${Esc}[33m")
-set(Blue "${Esc}[34m")
-set(Magenta "${Esc}[35m")
-set(Cyan "${Esc}[36m")
-set(White "${Esc}[37m")
 
 # Determine platform and architecture
 if(WIN32)
@@ -39,132 +28,72 @@ elseif(UNIX AND NOT APPLE)
 else()
     message(FATAL_ERROR "Unsupported platform. Only Windows and Linux are supported.")
 endif()
+
 # Set the library name
 set(AURORA_LIB_NAME slamtec_aurora_remote_sdk)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -std=gnu++11")
-
-# Find OpenCV
-find_package(OpenCV REQUIRED)
-
-
-
 # Add the determined library path to the linker search path
-get_filename_component(AURORA_LIB_PATH_ABS "${AURORA_LIB_PATH}" ABSOLUTE)
-
 include_directories(${PROJECT_SOURCE_DIR}/../aurora_remote_public/include)
-link_directories(${AURORA_LIB_PATH_ABS})
-message(STATUS "")
-message(STATUS "${Green}Aurora SDK library path: ${AURORA_LIB_PATH_ABS}${Reset}")
-message(STATUS "Please add ${Green}export LD_LIBRARY_PATH=${AURORA_LIB_PATH_ABS}:\$LD_LIBRARY_PATH ${Reset} to ~/.bashrc")
-message(STATUS "")
+link_directories(${AURORA_LIB_PATH})
 
+message(STATUS "Aurora SDK library path: ${AURORA_LIB_PATH}")
 
-find_package(catkin REQUIRED COMPONENTS
-  nav_msgs
-  roscpp
-  rospy
-  sensor_msgs
-  std_msgs
-  tf
-  message_generation
-  cv_bridge
-)
-# Find thread library
-find_package(Threads REQUIRED)
+# find dependencies
+find_package(OpenCV REQUIRED)
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclpy REQUIRED)
 
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(Threads) 
 
-add_message_files(
-  FILES
-  OptionalBool.msg
-  OptionalInt8.msg
-  OptionalInt16.msg
-  OptionalInt32.msg
-  OptionalInt64.msg
-  OptionalUInt8.msg
-  OptionalUInt16.msg
-  OptionalUInt32.msg
-  OptionalUInt64.msg
-  OptionalFlt32.msg
-  OptionalFlt64.msg
-  Vec2DInt32.msg
-  Vec2DFlt32.msg
-  Line2DFlt32.msg
-  Line2DFlt32Array.msg
-  RectInt32.msg
-  RectFlt32.msg
-  RobotDeviceInfo.msg
-  MapKind.msg
-  ArtifactUsage.msg
-  SensorType.msg
-  ImpactType.msg
-  BasicSensorInfo.msg
-  BasicSensorInfoArray.msg
-  BasicSensorValue.msg
-  BasicSensorValueData.msg
-  BasicSensorValueDataArray.msg
-  ActionDirection.msg
-  RobotBasicState.msg
-  SyncMapRequest.msg
-  MoveOptionFlag.msg
-  MoveOptions.msg
-  MoveByDirectionRequest.msg
-  MoveByThetaRequest.msg
-  MoveToRequest.msg
-  MoveToLocationsRequest.msg
-  RotateToRequest.msg
-  RotateRequest.msg
-  LocalizationMovement.msg
-  OptionalLocalizationMovement.msg
-  LocalizationOptions.msg
-  RecoverLocalizationRequest.msg
-  ClearMapRequest.msg
-  SetMapUpdateRequest.msg
-  SetMapLocalizationRequest.msg
-  GoHomeRequest.msg
-  CancelActionRequest.msg
-  AddLineRequest.msg
-  AddLinesRequest.msg
-  RemoveLineRequest.msg
-  ClearLinesRequest.msg
-  MoveLineRequest.msg
-  MoveLinesRequest.msg
-  RelocalizationCancelRequest.msg
-  SystemStatus.msg
-  RelocalizationStatus.msg
+rosidl_generate_interfaces(${PROJECT_NAME}
+ msg/SyncMapRequest.msg
+ msg/ClearMapRequest.msg
+ msg/SetMapUpdateRequest.msg
+ msg/SetMapLocalizationRequest.msg
+ msg/RelocalizationStatus.msg
+ msg/RelocalizationCancelRequest.msg
+ msg/SystemStatus.msg
+ srv/SyncGetStcm.srv
+ srv/SyncSetStcm.srv
+ srv/RelocalizationRequest.srv
+ DEPENDENCIES nav_msgs sensor_msgs std_msgs
 )
 
-add_service_files(
-  FILES
-  RelocalizationRequest.srv
-  SyncGetStcm.srv
-  SyncSetStcm.srv
-)
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME})
+ament_export_dependencies(nav_msgs)
+ament_export_dependencies(rclcpp)
+ament_export_dependencies(rclpy)
+ament_export_dependencies(sensor_msgs)
+ament_export_dependencies(std_msgs)
+ament_export_dependencies(std_srvs)
+ament_export_dependencies(tf2)
+ament_export_dependencies(tf2_ros)
+ament_export_dependencies(geometry_msgs)
+ament_export_dependencies(tf2_msgs)
+ament_export_dependencies(tf2_geometry_msgs)
+ament_export_dependencies(message_runtime)
+ament_export_dependencies(rosidl_default_runtime)
 
-generate_messages(
-  DEPENDENCIES
-  nav_msgs
-  sensor_msgs
-  std_msgs
+include_directories(include)
+include_directories(${AMENT_PREFIX_PATH})
+include_directories(~/ros2_humble/ros2-linux/include)
+include_directories($ENV{AMENT_PREFIX_PATH}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/build/slamware_ros_sdk/rosidl_generator_cpp)
+include_directories(${OpenCV_INCLUDE_DIRS}
 )
-
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES slamware_ros_sdk
-  CATKIN_DEPENDS nav_msgs roscpp rospy sensor_msgs std_msgs tf message_runtime
-)
-
-include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
-)
-message("${INCLUDE_DIRECTORIES}")
-
-add_library(${PROJECT_NAME} STATIC
-  src/client/slamware_ros_sdk_client.cpp
-)
-add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}_generate_messages_cpp)
 
 add_executable(slamware_ros_sdk_server_node
   src/server/server_params.cpp
@@ -175,39 +104,67 @@ add_executable(slamware_ros_sdk_server_node
   src/server/slamware_ros_sdk_server_node.cpp
   src/server/slamware_ros_sdk_server.cpp
 )
-add_dependencies(slamware_ros_sdk_server_node ${PROJECT_NAME}_generate_messages_cpp)
+
+ament_target_dependencies(slamware_ros_sdk_server_node rclcpp std_msgs std_srvs tf2_ros tf2_geometry_msgs cv_bridge sensor_msgs OpenCV)
+
+if(COMMAND rosidl_get_typesupport_target)
+  rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
+  target_link_libraries(slamware_ros_sdk_server_node ${cpp_typesupport_target})
+else()
+  rosidl_target_interfaces(slamware_ros_sdk_server_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+endif()
+
 target_include_directories(slamware_ros_sdk_server_node
   PRIVATE ${SLTC_SDK_INC_DIR}
 )
-target_compile_options(slamware_ros_sdk_server_node
+target_compile_options(slamware_ros_sdk_server_node 
   PRIVATE -Wno-deprecated-declarations
 )
-target_link_libraries(slamware_ros_sdk_server_node
-${AURORA_LIB_PATH}/libslamtec_aurora_remote_sdk.so
-  ${catkin_LIBRARIES}
+
+target_link_libraries(slamware_ros_sdk_server_node 
+  ${AURORA_LIB_PATH}/libslamtec_aurora_remote_sdk.so
   pthread
   dl
   rt
 )
 
-install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}_server_node
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # uncomment the line when a copyright and license is not present in all source files
+  #set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # uncomment the line when this package is not in a git repo
+  #set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+install(TARGETS ${PROJECT_NAME}_server_node 
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+	DESTINATION include/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.h"
   PATTERN ".svn" EXCLUDE
 )
+ament_export_include_directories(include/${PROJECT_NAME})
 
 install(FILES
-  launch/slamware_ros_sdk_server_node.launch
-  launch/view_slamware_ros_sdk_server_node.launch
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
+  launch/slamware_ros_sdk_server_node.xml
+  launch/view_slamware_ros_sdk_server_node.xml
+  DESTINATION share/${PROJECT_NAME}/launch
 )
 
-install(DIRECTORY rviz
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+install(DIRECTORY 
+  rviz
+	DESTINATION share/${PROJECT_NAME}
 )
+
+# Install launch files.
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+ament_package()

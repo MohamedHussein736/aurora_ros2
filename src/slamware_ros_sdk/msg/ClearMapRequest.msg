@@ -1,2 +1,1 @@
-
-MapKind kind
+# currently nothing in this message

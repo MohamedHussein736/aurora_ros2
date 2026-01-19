@@ -1,34 +1,36 @@
-/**
- * @file server_worker_base.h
- * @brief Base class for server worker in Slamware ROS SDK.
- */
 
 #pragma once
 
 #include "server_params.h"
 #include "server_work_data.h"
 
-#include <tf/transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
 
-namespace slamware_ros_sdk
-{
+#include <chrono>
+
+#include <memory>
+
+namespace slamware_ros_sdk {
 
     class SlamwareRosSdkServer;
 
     class ServerWorkerBase
     {
     public:
-        typedef std::chrono::steady_clock clock_t;
-        typedef clock_t::time_point time_point_t;
+        typedef std::chrono::steady_clock         clock_t;
+        typedef clock_t::time_point                 time_point_t;
 
     public:
-        ServerWorkerBase(SlamwareRosSdkServer *pRosSdkServer, const std::string &wkName, const std::chrono::milliseconds &triggerInterval);
+        ServerWorkerBase(SlamwareRosSdkServer* pRosSdkServer
+            , const std::string& wkName
+            , const std::chrono::milliseconds& triggerInterval
+            );
         virtual ~ServerWorkerBase();
 
-        const std::string &getWorkerName() const { return workerName_; }
+        const std::string& getWorkerName() const { return workerName_; }
 
         time_point_t getNextTimepointToTrigger() const { return nextTimepointToTrigger_; }
-
+        
         bool isWorkLoopInitOk() const { return isWorkLoopInitOk_; }
         virtual void resetOnWorkLoopBegin();
         virtual bool reinitWorkLoop();
@@ -39,17 +41,17 @@ namespace slamware_ros_sdk
         virtual void doPerform() = 0;
 
     protected:
-        SlamwareRosSdkServer *rosSdkServer() const { return rosSdkServer_; }
+        SlamwareRosSdkServer* rosSdkServer() const { return rosSdkServer_; }
 
-        ros::NodeHandle &rosNodeHandle() const;
-        const ServerParams &serverParams() const;
-        tf::TransformBroadcaster &tfBroadcaster() const;
+        std::shared_ptr<rclcpp::Node> rosNodeHandle() const;
+        const ServerParams& serverParams() const;
+        std::unique_ptr<tf2_ros::TransformBroadcaster>& tfBroadcaster() const;
 
         ServerWorkData_ConstPtr workData() const;
         ServerWorkData_Ptr mutableWorkData();
 
     private:
-        SlamwareRosSdkServer *rosSdkServer_;
+        SlamwareRosSdkServer* rosSdkServer_;
         std::string workerName_;
 
     protected:
@@ -58,6 +60,6 @@ namespace slamware_ros_sdk
         time_point_t nextTimepointToTrigger_;
     };
 
-    typedef std::shared_ptr<ServerWorkerBase> ServerWorkerBase_Ptr;
-
+    typedef std::shared_ptr<ServerWorkerBase>         ServerWorkerBase_Ptr;
+    
 }

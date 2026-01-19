@@ -1,53 +1,109 @@
-/**
- * @file server_workers.cpp
- * @brief Implementation of various server workers for the Slamware ROS SDK.
- */
-
 #include "server_workers.h"
 #include "slamware_ros_sdk_server.h"
-
-#include <assert.h>
-#include <sensor_msgs/MagneticField.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <cassert>
+#include <limits>
+#include <random>
 #include <opencv2/opencv.hpp>
 #include <cv_bridge/cv_bridge.h>
-#include <random>
-#include <cmath>
-
-namespace slamware_ros_sdk
-{
+using namespace rp::standalone::aurora;
+namespace slamware_ros_sdk {
 
     //////////////////////////////////////////////////////////////////////////
-    ServerRobotDeviceInfoWorker::ServerRobotDeviceInfoWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
+     ServerOdometryWorker::ServerOdometryWorker(SlamwareRosSdkServer* pRosSdkServer
+        , const std::string& wkName
+        , const std::chrono::milliseconds& triggerInterval
+        )
         : super_t(pRosSdkServer, wkName, triggerInterval)
+        , lastPoseStamped_(geometry_msgs::msg::PoseStamped())
+        , firstPoseReceived_(false)
     {
-        auto &nhRos = rosNodeHandle();
+        const auto& srvParams = serverParams();
+        auto nhRos = rosNodeHandle();
+        pubOdometry_ = nhRos->create_publisher<nav_msgs::msg::Odometry>(srvParams.getParameter<std::string>(std::string("odom_topic")), 10);
     }
 
-    ServerRobotDeviceInfoWorker::~ServerRobotDeviceInfoWorker()
+    ServerOdometryWorker::~ServerOdometryWorker()
     {
         //
     }
 
-    void ServerRobotDeviceInfoWorker::doPerform()
+    bool ServerOdometryWorker::reinitWorkLoop()
     {
-        // do nothing
+        if (!this->super_t::reinitWorkLoop())
+            return false;
+        firstPoseReceived_ = false;
+        isWorkLoopInitOk_ = true;
+        return isWorkLoopInitOk_;
+    }
+
+    double ServerOdometryWorker::getYawFromQuaternion(const geometry_msgs::msg::Quaternion &quat)
+    {
+        tf2::Quaternion q(quat.x, quat.y, quat.z, quat.w);
+        return tf2::getYaw(q);
+    }
+
+    void ServerOdometryWorker::doPerform()
+    {
+        const auto& srvParams = serverParams();
+        auto wkDat = mutableWorkData();
+        const auto& currentPoseStamped = wkDat->robotPose;
+
+        if(!firstPoseReceived_) {
+            lastPoseStamped_ = currentPoseStamped;
+            firstPoseReceived_ = true;
+            return;
+        }
+
+        double dt = (rclcpp::Time(currentPoseStamped.header.stamp) -
+                     rclcpp::Time(lastPoseStamped_.header.stamp)).seconds();
+        if (dt < std::numeric_limits<double>::epsilon())
+            return;
+
+        float deltaX = currentPoseStamped.pose.position.x - lastPoseStamped_.pose.position.x;
+        float deltaY = currentPoseStamped.pose.position.y - lastPoseStamped_.pose.position.y;
+        double deltaYaw = getYawFromQuaternion(currentPoseStamped.pose.orientation) -
+                          getYawFromQuaternion(lastPoseStamped_.pose.orientation);
+
+        double vx = deltaX / dt;
+        double vy = deltaY / dt;
+        double vth = deltaYaw / dt;
+
+        nav_msgs::msg::Odometry odom;
+        odom.header.stamp = currentPoseStamped.header.stamp;
+        odom.header.frame_id = srvParams.getParameter<std::string>("odom_frame");
+        odom.child_frame_id = srvParams.getParameter<std::string>("robot_frame");
+
+        odom.pose.pose = currentPoseStamped.pose;
+        odom.twist.twist.linear.x = vx;
+        odom.twist.twist.linear.y = vy;
+        odom.twist.twist.angular.z = vth;
+        pubOdometry_->publish(odom);
+
+        auto &tfBrdcst = tfBroadcaster();
+        geometry_msgs::msg::TransformStamped odomTrans;
+        odomTrans.header.stamp = currentPoseStamped.header.stamp;
+        odomTrans.header.frame_id = srvParams.getParameter<std::string>("odom_frame");
+        odomTrans.child_frame_id = srvParams.getParameter<std::string>("robot_frame");
+        odomTrans.transform.translation.x = currentPoseStamped.pose.position.x;
+        odomTrans.transform.translation.y = currentPoseStamped.pose.position.y;
+        odomTrans.transform.translation.z = currentPoseStamped.pose.position.z;
+        odomTrans.transform.rotation = currentPoseStamped.pose.orientation;
+        tfBrdcst->sendTransform(odomTrans);
+
+        lastPoseStamped_ = currentPoseStamped;
     }
 
     //////////////////////////////////////////////////////////////////////////
 
-    ServerRobotPoseWorker::ServerRobotPoseWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
+    ServerRobotPoseWorker::ServerRobotPoseWorker(SlamwareRosSdkServer* pRosSdkServer
+        , const std::string& wkName
+        , const std::chrono::milliseconds& triggerInterval
+        )
         : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval),lastTimestamp_(0)
     {
-        const auto &srvParams = serverParams();
-        auto &nhRos = rosNodeHandle();
-        pubRobotPose_ = nhRos.advertise<geometry_msgs::PoseStamped>(srvParams.robot_pose_topic, 10);
+        const auto& srvParams = serverParams();
+        auto nhRos = rosNodeHandle();
+        pubRobotPose_ = nhRos->create_publisher<geometry_msgs::msg::PoseStamped>(srvParams.getParameter<std::string>(std::string("robot_pose_topic")), 10);
     }
 
     ServerRobotPoseWorker::~ServerRobotPoseWorker()
@@ -57,19 +113,17 @@ namespace slamware_ros_sdk
 
     void ServerRobotPoseWorker::doPerform()
     {
-        const auto &srvParams = serverParams();
-        auto &tfBrdcst = tfBroadcaster();
+        const auto& srvParams = serverParams();
+        auto& tfBrdcst = tfBroadcaster();
         auto wkDat = mutableWorkData();
-
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
         if (!auroraSDK)
         {
-            ROS_INFO("doPerform(), auroraSDK is null.");
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "doPerform(), auroraSDK is null.");
             return;
         }
 
         slamtec_aurora_sdk_pose_se3_t pose;
-        // auroraSDK->dataProvider.getCurrentPoseSE3(pose);
         uint64_t pose_timestamp;
         if(auroraSDK->dataProvider.getCurrentPoseSE3WithTimestamp(pose,pose_timestamp))
         {
@@ -86,8 +140,7 @@ namespace slamware_ros_sdk
         {
             return;
         }
-        // current pose from opencv axis to ros1 axis
-        wkDat->robotPose.header.stamp = ros::Time::now();
+        wkDat->robotPose.header.stamp = rclcpp::Clock().now();
         wkDat->robotPose.pose.position.x = pose.translation.x;
         wkDat->robotPose.pose.position.y = pose.translation.y;
         wkDat->robotPose.pose.position.z = pose.translation.z;
@@ -97,123 +150,24 @@ namespace slamware_ros_sdk
         wkDat->robotPose.pose.orientation.z = pose.quaternion.z;
         wkDat->robotPose.pose.orientation.w = pose.quaternion.w;
 
-        // ROS_INFO("vslam_pose - Translation: x=%f, y=%f, z=%f, Rotation: x=%f, y=%f, z=%f, w=%f",
-        //  vslam_pose.getOrigin().x(), vslam_pose.getOrigin().y(), vslam_pose.getOrigin().z(),
-        //  vslam_pose.getRotation().x(), vslam_pose.getRotation().y(),
-        //  vslam_pose.getRotation().z(), vslam_pose.getRotation().w());
-
-        // publish robot_pose transform
-        // geometry_msgs::TransformStamped t;
-        // t.header.stamp = ros::Time::now();
-        // t.header.frame_id = srvParams.map_frame;
-        // t.child_frame_id = srvParams.robot_frame;
-
-        // t.transform.translation.x = wkDat->robotPose.pose.position.x;
-        // t.transform.translation.y = wkDat->robotPose.pose.position.y;
-        // t.transform.translation.z = wkDat->robotPose.pose.position.z;
-        // t.transform.rotation = wkDat->robotPose.pose.orientation;
-        // tfBrdcst.sendTransform(t);
-
-        geometry_msgs::PoseStamped ros_pose;
-        ros_pose.header.frame_id = srvParams.map_frame;
+        geometry_msgs::msg::PoseStamped ros_pose;
+        ros_pose.header.frame_id = srvParams.getParameter<std::string>("map_frame");
         ros_pose.header.stamp = wkDat->robotPose.header.stamp;
         ros_pose.pose = wkDat->robotPose.pose;
-        pubRobotPose_.publish(ros_pose);
+        pubRobotPose_->publish(ros_pose);
     }
 
     //////////////////////////////////////////////////////////////////////////
-    ServerOdometryWorker::ServerOdometryWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : super_t(pRosSdkServer, wkName, triggerInterval),
-          lastPoseStamped_(geometry_msgs::PoseStamped()),
-          firstPoseReceived_(false)
-    {
 
-        const auto &srvParams = serverParams();
-        auto nhRos = rosNodeHandle();
-        pubOdometry_ = nhRos.advertise<nav_msgs::Odometry>(srvParams.odom_topic, 10);
-    }
-
-    ServerOdometryWorker::~ServerOdometryWorker()
+    ServerExploreMapUpdateWorker::ServerExploreMapUpdateWorker(SlamwareRosSdkServer* pRosSdkServer
+        , const std::string& wkName
+        , const std::chrono::milliseconds& triggerInterval
+        )
+        : super_t(pRosSdkServer, wkName, triggerInterval)
+        , shouldReinitMap_(true)
+        , hasSyncedWholeMap_(false)
     {
         //
-    }
-
-    bool ServerOdometryWorker::reinitWorkLoop()
-    {
-
-        if (!this->super_t::reinitWorkLoop())
-            return false;
-        firstPoseReceived_ = false;
-        isWorkLoopInitOk_ = true;
-        return isWorkLoopInitOk_;
-    }
-    double ServerOdometryWorker::getYawFromQuaternion(const geometry_msgs::Quaternion &quat)
-    {
-        tf::Quaternion q(quat.x, quat.y, quat.z, quat.w);
-        return tf::getYaw(q);
-    }
-
-    void ServerOdometryWorker::doPerform()
-    {
-        const auto &srvParams = serverParams();
-        ros::Time currentTime = ros::Time::now();
-        auto wkDat = mutableWorkData();
-        const auto &currentPoseStamped = wkDat->robotPose;
-
-        if (!firstPoseReceived_)
-        {
-            lastPoseStamped_ = currentPoseStamped;
-            // lastPoseTime_ = currentTime;
-            firstPoseReceived_ = true;
-            return;
-        }
-
-        float deltaX = currentPoseStamped.pose.position.x - lastPoseStamped_.pose.position.x;
-        float deltaY = currentPoseStamped.pose.position.y - lastPoseStamped_.pose.position.y;
-        double deltaYaw = getYawFromQuaternion(currentPoseStamped.pose.orientation) -
-                          getYawFromQuaternion(lastPoseStamped_.pose.orientation);
-        double dt = (currentPoseStamped.header.stamp - lastPoseStamped_.header.stamp).toSec();
-        double vx = deltaX / dt;
-        double vy = deltaY / dt;
-        double vth = deltaYaw / dt;
-
-        nav_msgs::Odometry odom;
-        odom.header.stamp = currentPoseStamped.header.stamp;
-        odom.header.frame_id = srvParams.odom_frame;
-        odom.child_frame_id = srvParams.robot_frame;
-
-        odom.pose.pose = currentPoseStamped.pose;
-        odom.twist.twist.linear.x = vx;
-        odom.twist.twist.linear.y = vy;
-        odom.twist.twist.angular.z = vth;
-        pubOdometry_.publish(odom);
-
-        auto &tfBrdcst = tfBroadcaster();
-        geometry_msgs::TransformStamped odomTrans;
-        odomTrans.header.stamp = currentPoseStamped.header.stamp;
-        odomTrans.header.frame_id = srvParams.odom_frame;
-        odomTrans.child_frame_id = srvParams.robot_frame;
-        odomTrans.transform.translation.x = currentPoseStamped.pose.position.x;
-        odomTrans.transform.translation.y = currentPoseStamped.pose.position.y;
-        odomTrans.transform.translation.z = currentPoseStamped.pose.position.z;
-        odomTrans.transform.rotation = currentPoseStamped.pose.orientation;
-        tfBrdcst.sendTransform(odomTrans);
-
-        lastPoseStamped_ = currentPoseStamped;
-    }
-    //////////////////////////////////////////////////////////////////////////
-
-    ServerExploreMapUpdateWorker::ServerExploreMapUpdateWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : super_t(pRosSdkServer, wkName, triggerInterval),
-          shouldReinitMap_(true),
-          hasSyncedWholeMap_(false)
-    {
     }
 
     ServerExploreMapUpdateWorker::~ServerExploreMapUpdateWorker()
@@ -223,58 +177,54 @@ namespace slamware_ros_sdk
 
     bool ServerExploreMapUpdateWorker::reinitWorkLoop()
     {
+        
         if (!this->super_t::reinitWorkLoop())
             return false;
         isWorkLoopInitOk_ = false;
         hasSyncedWholeMap_ = false;
-
         requestReinitMap_();
-
         isWorkLoopInitOk_ = true;
         return isWorkLoopInitOk_;
     }
 
     void ServerExploreMapUpdateWorker::doPerform()
     {
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         auto wkDat = mutableWorkData();
 
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
-            ROS_ERROR("Failed to get aurora sdk");
+        if (!auroraSDK) {
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "Failed to get aurora sdk");
             return;
         }
 
         if (!checkToReinitMap_(auroraSDK, wkDat))
             return;
 
-        if (!hasSyncedWholeMap_)
-        {
-            ros::Duration dt = ros::Time::now() - mapInitTime_;
-            if (dt.toSec() > 10)
-            {
+        if(!hasSyncedWholeMap_) {
+            rclcpp::Duration dt = rclcpp::Clock().now() - mapInitTime_;
+            if(dt.seconds() > 15) {
                 wkDat->syncMapRequested.store(true);
                 hasSyncedWholeMap_ = true;
-                ROS_INFO("sync the map after preview map generated.");
+                RCLCPP_INFO(rclcpp::get_logger("server workers"), "sync the map after preview map generated.");
             }
         }
 
         if (wkDat->syncMapRequested.load())
         {
-            ROS_INFO("try to sync whole explore map.");
+            RCLCPP_INFO(rclcpp::get_logger("server workers"), "try to sync whold explore map.");
             if (syncWholeMap_(srvParams, auroraSDK, wkDat))
             {
                 wkDat->syncMapRequested.store(false);
-                ROS_INFO("whole explore map synchronized.");
+                RCLCPP_INFO(rclcpp::get_logger("server workers"), "whold explore map synchronized.");
             }
             else
             {
-                ROS_WARN("failed to sync whole explore map.");
+                RCLCPP_WARN(rclcpp::get_logger("server workers"), "failed to sync whole explore map.");
             }
-            lastMapUpdateTime_ = clock_t::now();
             return;
         }
+
         updateMapNearRobot_(srvParams, auroraSDK, wkDat);
     }
 
@@ -283,14 +233,12 @@ namespace slamware_ros_sdk
         shouldReinitMap_ = true;
     }
 
-    bool ServerExploreMapUpdateWorker::checkToReinitMap_(
-        rp::standalone::aurora::RemoteSDK *sdk,
-        const ServerWorkData_Ptr &wkDat)
+    bool ServerExploreMapUpdateWorker::checkToReinitMap_(rp::standalone::aurora::RemoteSDK *sdk, const ServerWorkData_Ptr &wkDat)
     {
         if (!shouldReinitMap_)
             return true;
 
-        ROS_INFO("try to reinit explore map.");
+        RCLCPP_INFO(rclcpp::get_logger("server workers"), "try to reinit explore map.");
         wkDat->syncMapRequested.store(true);
 
         sdk->lidar2DMapBuilder.requireRedrawPreviewMap();
@@ -298,45 +246,42 @@ namespace slamware_ros_sdk
         sdk->lidar2DMapBuilder.getPreviewMapGenerationOptions(genOption);
         wkDat->exploreMapHolder.reinit(genOption.resolution);
 
-        ROS_INFO(
+        RCLCPP_INFO(
+            rclcpp::get_logger("server workers"),
             "explore map initialized, resolution: %f, moreCellCntToExtend: %d.",
             genOption.resolution,
             wkDat->exploreMapHolder.getMoreCellCountToExtend());
         shouldReinitMap_ = false;
-        mapInitTime_ = ros::Time::now();
+        mapInitTime_ = rclcpp::Clock().now();
         return true;
     }
 
-    bool ServerExploreMapUpdateWorker::checkRecvResolution_(
-        float recvResolution, const ServerWorkData_Ptr &wkDat)
+    bool ServerExploreMapUpdateWorker::checkRecvResolution_(float recvResolution, const ServerWorkData_Ptr& wkDat)
     {
         const auto fResolution = wkDat->exploreMapHolder.resolution();
         if (std::abs(fResolution - recvResolution) <
             std::numeric_limits<float>::epsilon())
-            return true;
+          return true;
 
-        ROS_ERROR("local resolution: %f, received resolution: %f, request reinit.", fResolution, recvResolution);
+        RCLCPP_ERROR(rclcpp::get_logger("server workers"), "local resolution: %f, received resolution: %f, request reinit.", fResolution, recvResolution);
         requestReinitMap_();
         return false;
     }
 
-    bool ServerExploreMapUpdateWorker::updateMapInCellIdxRect_(
-        const rp::standalone::aurora::OccupancyGridMap2DRef &prevMap,
-        const utils::RectangleF &reqRect,
-        const ServerWorkData_Ptr &wkDat)
+    bool ServerExploreMapUpdateWorker::updateMapInCellIdxRect_(const rp::standalone::aurora::OccupancyGridMap2DRef& prevMap
+            , const utils::RectangleF& reqRect
+            , const ServerWorkData_Ptr& wkDat
+            )
     {
-        const auto &fResolution = prevMap.getResolution();
-
+        const auto& fResolution = prevMap.getResolution();
+        
         static const size_t MAX_FETCH_BLOCK_CXCY = 16 * 1024; // 16*16 to get 256 MB
         size_t fetchSize = (size_t)(reqRect.width() * reqRect.height() / fResolution / fResolution);
-        if (fetchSize > (MAX_FETCH_BLOCK_CXCY * MAX_FETCH_BLOCK_CXCY))
-        {
+        if (fetchSize > (MAX_FETCH_BLOCK_CXCY * MAX_FETCH_BLOCK_CXCY)) {
             // using smaller block to fetch
             float fetchLogicCXCY = MAX_FETCH_BLOCK_CXCY * fResolution;
-            for (float y = 0; y < reqRect.height(); y += fetchLogicCXCY)
-            {
-                for (float x = 0; x < reqRect.width(); x += fetchLogicCXCY)
-                {
+            for (float y = 0; y < reqRect.height(); y += fetchLogicCXCY) {
+                for (float x = 0; x < reqRect.width(); x += fetchLogicCXCY) {
                     slamtec_aurora_sdk_rect_t fetchRect;
                     fetchRect.x = x + reqRect.x();
                     fetchRect.y = y + reqRect.y();
@@ -349,8 +294,7 @@ namespace slamware_ros_sdk
                 }
             }
         }
-        else
-        {
+        else {
             slamtec_aurora_sdk_rect_t fetchRect;
             fetchRect.x = reqRect.x();
             fetchRect.y = reqRect.y();
@@ -361,33 +305,37 @@ namespace slamware_ros_sdk
             prevMap.readCellData(fetchRect, info, mapData, false);
             wkDat->exploreMapHolder.setMapData(info.real_x, info.real_y, fResolution, info.cell_width, info.cell_height, mapData.data());
         }
-
+        
         if (!checkRecvResolution_(fResolution, wkDat))
             return false;
 
         return true;
     }
 
-    bool ServerExploreMapUpdateWorker::syncWholeMap_(
-        const ServerParams &srvParams,
-        rp::standalone::aurora::RemoteSDK *sdk,
-        const ServerWorkData_Ptr &wkDat)
+    bool ServerExploreMapUpdateWorker::syncWholeMap_(const ServerParams& srvParams
+        , rp::standalone::aurora::RemoteSDK *sdk
+        , const ServerWorkData_Ptr& wkDat
+        )
     {
         auto &prevMap = sdk->lidar2DMapBuilder.getPreviewMap();
 
         slamtec_aurora_sdk_2dmap_dimension_t mapDimension;
         prevMap.getMapDimension(mapDimension);
         utils::RectangleF knownArea(mapDimension.min_x, mapDimension.min_y,
-                                    mapDimension.max_x - mapDimension.min_x,
-                                    mapDimension.max_y - mapDimension.min_y);
+            mapDimension.max_x - mapDimension.min_x,
+            mapDimension.max_y - mapDimension.min_y);
 
         const auto knownCellIdxRect = wkDat->exploreMapHolder.calcRoundedCellIdxRect(knownArea);
-        ROS_INFO("known area: ((%f, %f), (%f, %f)), cell rect : ((% d, % d), (% d, % d)) ",
-                 knownArea.x(), knownArea.y(), knownArea.width(), knownArea.height(),
-                 knownCellIdxRect.x(), knownCellIdxRect.y(), knownCellIdxRect.width(), knownCellIdxRect.height());
+        RCLCPP_INFO(rclcpp::get_logger("server workers"), "known area: ((%f, %f), (%f, %f)), cell rect: ((%d, %d), (%d, %d))"
+            , knownArea.x(), knownArea.y(), knownArea.width(), knownArea.height()
+            , knownCellIdxRect.x(), knownCellIdxRect.y(), knownCellIdxRect.width(), knownCellIdxRect.height()
+            );
+        //Maintain consistency between ROS1 and ROS2 code to eliminate unnecessary errors
+        // if (ServerMapHolder::sfIsCellIdxRectEmpty(knownCellIdxRect) || 
+        //     knownCellIdxRect.width() < MIN_VALID_MAP_DIMENSION || knownCellIdxRect.height() < MIN_VALID_MAP_DIMENSION)
         if (ServerMapHolder::sfIsCellIdxRectEmpty(knownCellIdxRect))
         {
-            ROS_INFO("sync map, knownCellIdxRect is empty.");
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "sync map, knownCellIdxRect is empty or too small.");
             return false;
         }
 
@@ -397,12 +345,13 @@ namespace slamware_ros_sdk
         return updateMapInCellIdxRect_(prevMap, knownArea, wkDat);
     }
 
-    bool ServerExploreMapUpdateWorker::updateMapNearRobot_(
-        const ServerParams &srvParams,
-        rp::standalone::aurora::RemoteSDK *sdk,
-        const ServerWorkData_Ptr &wkDat)
+    bool ServerExploreMapUpdateWorker::updateMapNearRobot_(const ServerParams& srvParams
+            , rp::standalone::aurora::RemoteSDK *sdk
+            , const ServerWorkData_Ptr& wkDat
+            )
     {
-        float fVal = srvParams.map_update_near_robot_half_wh;
+        float fVal(2.0f);
+        srvParams.get_parameter<float>("map_update_near_robot_half_wh", fVal);
         const float fHalfWH = std::max<float>(2.0f, fVal);
         const float fWH = fHalfWH + fHalfWH;
         const auto nearRobotArea = utils::RectangleF(
@@ -410,22 +359,23 @@ namespace slamware_ros_sdk
             static_cast<float>(wkDat->robotPose.pose.position.y - fHalfWH),
             fWH, fWH);
         const auto nearRobotIdxRect = wkDat->exploreMapHolder.calcMinBoundingCellIdxRect(nearRobotArea);
+
         auto &prevMap = sdk->lidar2DMapBuilder.getPreviewMap();
         slamtec_aurora_sdk_2dmap_dimension_t mapDimension;
         prevMap.getMapDimension(mapDimension);
         utils::RectangleF knownArea(mapDimension.min_x, mapDimension.min_y,
-                                    mapDimension.max_x - mapDimension.min_x,
-                                    mapDimension.max_y - mapDimension.min_y);
+            mapDimension.max_x - mapDimension.min_x,
+            mapDimension.max_y - mapDimension.min_y);
         const auto knownCellIdxRect = wkDat->exploreMapHolder.calcRoundedCellIdxRect(knownArea);
-#if 0
-        ROS_INFO("known area: ((%f, %f), (%f, %f)), cell rect: ((%d, %d), (%d, %d))."
+    #if 0
+        RCLCPP_INFO(rclcpp::get_logger("server workers"), "known area: ((%f, %f), (%f, %f)), cell rect: ((%d, %d), (%d, %d))."
             , knownArea.x(), knownArea.y(), knownArea.width(), knownArea.height()
             , knownCellIdxRect.x(), knownCellIdxRect.y(), knownCellIdxRect.width(), knownCellIdxRect.height()
             );
-#endif
+    #endif
         if (ServerMapHolder::sfIsCellIdxRectEmpty(knownCellIdxRect))
         {
-            ROS_ERROR("update map, knownCellIdxRect is empty, request sync map.");
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "update map, knownCellIdxRect is empty, request sync map.");
             rosSdkServer()->requestSyncMap();
             return false;
         }
@@ -433,30 +383,29 @@ namespace slamware_ros_sdk
         const auto reqIdxRect = ServerMapHolder::sfIntersectionOfCellIdxRect(nearRobotIdxRect, knownCellIdxRect);
         if (ServerMapHolder::sfIsCellIdxRectEmpty(reqIdxRect))
         {
-            ROS_WARN("knownCellIdxRect: ((%d, %d), (%d, %d)), nearRobotIdxRect : ((% d, % d), (% d, % d)), intersection is empty.",
-                     knownCellIdxRect.x(), knownCellIdxRect.y(),
-                     knownCellIdxRect.width(), knownCellIdxRect.height(),
-                     nearRobotIdxRect.x(), nearRobotIdxRect.y(),
-                     nearRobotIdxRect.width(), nearRobotIdxRect.height());
+            RCLCPP_WARN(rclcpp::get_logger("server workers"), "knownCellIdxRect: ((%d, %d), (%d, %d)), nearRobotIdxRect: ((%d, %d), (%d, %d)), intersection is empty."
+                , knownCellIdxRect.x(), knownCellIdxRect.y(), knownCellIdxRect.width(), knownCellIdxRect.height()
+                , nearRobotIdxRect.x(), nearRobotIdxRect.y(), nearRobotIdxRect.width(), nearRobotIdxRect.height()
+                );
             return false;
         }
-        const auto &reqArea = wkDat->exploreMapHolder.calcAreaByCellIdxRect(reqIdxRect);
+        const auto& reqArea = wkDat->exploreMapHolder.calcAreaByCellIdxRect(reqIdxRect);
 
         return updateMapInCellIdxRect_(prevMap, reqArea, wkDat);
     }
 
     //////////////////////////////////////////////////////////////////////////
 
-    ServerExploreMapPublishWorker::ServerExploreMapPublishWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
+    ServerExploreMapPublishWorker::ServerExploreMapPublishWorker(SlamwareRosSdkServer* pRosSdkServer
+        , const std::string& wkName
+        , const std::chrono::milliseconds& triggerInterval
+        )
         : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval)
     {
-        const auto &srvParams = serverParams();
-        auto &nhRos = rosNodeHandle();
-        pubMapDat_ = nhRos.advertise<nav_msgs::OccupancyGrid>(srvParams.map_topic, 1, true);
-        pubMapInfo_ = nhRos.advertise<nav_msgs::MapMetaData>(srvParams.map_info_topic, 1, true);
+        const auto& srvParams = serverParams();
+        auto nhRos = rosNodeHandle();
+        pubMapDat_ = nhRos->create_publisher<nav_msgs::msg::OccupancyGrid>(srvParams.getParameter<std::string>("map_topic"), 1); // srvParams.map_topic, 1);
+        pubMapInfo_ = nhRos->create_publisher<nav_msgs::msg::MapMetaData>(srvParams.getParameter<std::string>("map_info_topic"), 1);// srvParams.map_info_topic, 1);
     }
 
     ServerExploreMapPublishWorker::~ServerExploreMapPublishWorker()
@@ -466,40 +415,40 @@ namespace slamware_ros_sdk
 
     void ServerExploreMapPublishWorker::doPerform()
     {
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         auto wkDat = workData();
 
         if (wkDat->exploreMapHolder.isMapDataEmpty())
         {
-            // ROS_WARN("current explore map data is empty.");
+            //RCLCPP_WARN(rclcpp::get_logger("server workers"), "current explore map data is empty.");
             return;
         }
 
-        nav_msgs::GetMap::Response msgMap;
+        nav_msgs::srv::GetMap::Response msgMap;
         wkDat->exploreMapHolder.fillRosMapMsg(msgMap);
 
         // Set the header information on the map
-        msgMap.map.header.stamp = ros::Time::now();
-        msgMap.map.header.frame_id = srvParams.map_frame;
+        msgMap.map.header.stamp = rclcpp::Clock().now();
+        msgMap.map.header.frame_id = srvParams.getParameter<std::string>("map_frame"); //srvParams.map_frame;
 
-        pubMapDat_.publish(msgMap.map);
-        pubMapInfo_.publish(msgMap.map.info);
+        pubMapDat_->publish(msgMap.map);
+        pubMapInfo_->publish(msgMap.map.info);
     }
 
     //////////////////////////////////////////////////////////////////////////
 
-    ServerLaserScanWorker::ServerLaserScanWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval),
-          compensatedAngleCnt_(360u),
-          absAngleIncrement_(C_FLT_2PI / compensatedAngleCnt_),
-          latestLidarStartTimestamp_(0)
+    ServerLaserScanWorker::ServerLaserScanWorker(SlamwareRosSdkServer* pRosSdkServer
+        , const std::string& wkName
+        , const std::chrono::milliseconds& triggerInterval
+        )
+        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval)
+        , compensatedAngleCnt_(360u)
+        , absAngleIncrement_(C_FLT_2PI / compensatedAngleCnt_)
+        , latestLidarStartTimestamp_(0)
     {
-        const auto &srvParams = serverParams();
-        auto &nhRos = rosNodeHandle();
-        pubLaserScan_ = nhRos.advertise<sensor_msgs::LaserScan>(srvParams.scan_topic, 10);
+        const auto& srvParams = serverParams();
+        auto nhRos = rosNodeHandle();
+        pubLaserScan_ = nhRos->create_publisher<sensor_msgs::msg::LaserScan>(srvParams.getParameter<std::string>("scan_topic"), 10); // srvParams.scan_topic, 10);
     }
 
     ServerLaserScanWorker::~ServerLaserScanWorker()
@@ -510,51 +459,48 @@ namespace slamware_ros_sdk
     void ServerLaserScanWorker::doPerform()
     {
         auto aurora = rosSdkServer()->safeGetAuroraSdk();
-        if (!aurora)
+        if(!aurora)
         {
-
-            ROS_ERROR("Failed to get aurora sdk");
+            RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to get aurora sdk");
             return;
         }
-        const auto &srvParams = serverParams();
-        auto &tfBrdcst = tfBroadcaster();
+        const auto& srvParams = serverParams();
+        auto& tfBrdcst = tfBroadcaster();
         auto wkDat = workData();
 
-        ros::Time startScanTime(0), endScanTime(0);
+        rclcpp::Time startScanTime(0), endScanTime(0);
         rp::standalone::aurora::SingleLayerLIDARScan scan;
         slamtec_aurora_sdk_pose_se3_t poseSE3;
-        startScanTime = ros::Time::now();
-        if (!aurora->dataProvider.peekRecentLIDARScanSingleLayer(scan, poseSE3, false))
-        {
+        startScanTime = rclcpp::Clock().now();
+        if(!aurora->dataProvider.peekRecentLIDARScanSingleLayer(scan, poseSE3, false)) {
             return;
         }
-        endScanTime = ros::Time::now();
+        endScanTime = rclcpp::Clock().now();
+        double dblScanDur = (endScanTime - startScanTime).seconds();
 
-        double dblScanDur = (endScanTime - startScanTime).toSec();
-
-        const auto &points = scan.scanData;
-
+        const auto& points = scan.scanData;
         if (points.size() < 2)
         {
-            ROS_ERROR("laser points count: %u, too small, skip publish.", (unsigned int)points.size());
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "laser points count: %u, too small, skip publish.", (unsigned int)points.size());
             return;
         }
 
-        sensor_msgs::LaserScan msgScan;
+        sensor_msgs::msg::LaserScan msgScan;
         msgScan.header.stamp = startScanTime;
-        msgScan.header.frame_id = srvParams.laser_frame;
+        msgScan.header.frame_id = srvParams.getParameter<std::string>("laser_frame"); //srvParams.laser_frame;
         fillRangeMinMaxInMsg_(points, msgScan);
 
         bool isLaserDataReverse = false;
-        if ((points.back().angle < points.front().angle && !srvParams.ladar_data_clockwise) ||
-            (points.back().angle > points.front().angle && srvParams.ladar_data_clockwise))
+        if ((points.back().angle < points.front().angle && !srvParams.getParameter<bool>("ladar_data_clockwise")) ||
+            (points.back().angle > points.front().angle && srvParams.getParameter<bool>("ladar_data_clockwise")))
         {
             isLaserDataReverse = true;
         }
 
-        if (srvParams.angle_compensate)
+        // if (srvParams.angle_compensate)
+        if (srvParams.getParameter<bool>("angle_compensate"))
         {
-            compensateAndfillRangesInMsg_(points, srvParams.ladar_data_clockwise, isLaserDataReverse, msgScan);
+            compensateAndfillRangesInMsg_(points, srvParams.getParameter<bool>("ladar_data_clockwise"), isLaserDataReverse, msgScan);
         }
         else
         {
@@ -564,39 +510,35 @@ namespace slamware_ros_sdk
         msgScan.scan_time = dblScanDur;
         msgScan.time_increment = dblScanDur / (double)(msgScan.ranges.size() - 1);
 
-        pubLaserScan_.publish(msgScan);
+        pubLaserScan_->publish(msgScan);
 
-        geometry_msgs::TransformStamped t;
-        t.header.stamp = msgScan.header.stamp;
-        t.header.frame_id = srvParams.map_frame;
-        t.child_frame_id = srvParams.laser_frame;
-
-        t.transform.translation.x = poseSE3.translation.x;
-        t.transform.translation.y =  poseSE3.translation.y;
-        t.transform.translation.z =  poseSE3.translation.z;
-        t.transform.rotation.x = poseSE3.quaternion.x;
-        t.transform.rotation.y = poseSE3.quaternion.y;
-        t.transform.rotation.z = poseSE3.quaternion.z;
-        t.transform.rotation.w = poseSE3.quaternion.w;
-        tfBrdcst.sendTransform(t);
+        geometry_msgs::msg::TransformStamped LaserTrans;
+        LaserTrans.header.stamp = msgScan.header.stamp;
+        LaserTrans.header.frame_id = srvParams.getParameter<std::string>("map_frame");
+        LaserTrans.child_frame_id = srvParams.getParameter<std::string>("laser_frame");
+        LaserTrans.transform.translation.x = poseSE3.translation.x;
+        LaserTrans.transform.translation.y = poseSE3.translation.y;
+        LaserTrans.transform.translation.z = poseSE3.translation.z;
+        LaserTrans.transform.rotation.x = poseSE3.quaternion.x;
+        LaserTrans.transform.rotation.y = poseSE3.quaternion.y;
+        LaserTrans.transform.rotation.z = poseSE3.quaternion.z;
+        LaserTrans.transform.rotation.w = poseSE3.quaternion.w;
+        tfBrdcst->sendTransform(LaserTrans);
     }
 
-    void ServerLaserScanWorker::fillRangeMinMaxInMsg_(
-        const std::vector<slamtec_aurora_sdk_lidar_scan_point_t> &laserPoints,
-        sensor_msgs::LaserScan &msgScan) const
+    void ServerLaserScanWorker::fillRangeMinMaxInMsg_(const std::vector<slamtec_aurora_sdk_lidar_scan_point_t> & laserPoints
+            , sensor_msgs::msg::LaserScan& msgScan
+            ) const
     {
         msgScan.range_min = std::numeric_limits<float>::infinity();
         msgScan.range_max = 0.0f;
         for (auto cit = laserPoints.cbegin(), citEnd = laserPoints.cend(); citEnd != cit; ++cit)
         {
-
             const float tmpDist = cit->dist;
-
             if (tmpDist < msgScan.range_min)
             {
                 msgScan.range_min = std::max<float>(0.0f, tmpDist);
             }
-
             if (msgScan.range_max < tmpDist)
             {
                 msgScan.range_max = tmpDist;
@@ -618,12 +560,12 @@ namespace slamware_ros_sdk
         return fRes;
     }
 
-    std::uint32_t ServerLaserScanWorker::calcCompensateDestIndexBySrcAngle_(
-        float srcAngle,
-        bool isAnglesReverse) const
+    std::uint32_t ServerLaserScanWorker::calcCompensateDestIndexBySrcAngle_(float srcAngle
+        , bool isAnglesReverse
+        ) const
     {
         assert(-C_FLT_PI <= srcAngle && srcAngle < C_FLT_PI);
-
+        
         float fDiff = (isAnglesReverse ? (C_FLT_PI - srcAngle) : (srcAngle + C_FLT_PI));
         fDiff = std::max<float>(0.0f, fDiff);
         fDiff = std::min<float>(fDiff, C_FLT_2PI);
@@ -634,10 +576,7 @@ namespace slamware_ros_sdk
         return destIdx;
     }
 
-    bool ServerLaserScanWorker::isSrcAngleMoreCloseThanOldSrcAngle_(
-        float srcAngle,
-        float destAngle,
-        float oldSrcAngle) const
+    bool ServerLaserScanWorker::isSrcAngleMoreCloseThanOldSrcAngle_(float srcAngle, float destAngle, float oldSrcAngle) const
     {
         assert(-C_FLT_PI <= srcAngle && srcAngle < C_FLT_PI);
         assert(-C_FLT_PI <= destAngle && destAngle < C_FLT_PI);
@@ -658,10 +597,11 @@ namespace slamware_ros_sdk
         return (newDiff < oldDiff);
     }
 
-    void ServerLaserScanWorker::compensateAndfillRangesInMsg_(
-        const std::vector<slamtec_aurora_sdk_lidar_scan_point_t> &laserPoints,
-        bool isClockwise, bool isLaserDataReverse,
-        sensor_msgs::LaserScan &msgScan) const
+    void ServerLaserScanWorker::compensateAndfillRangesInMsg_(const std::vector<slamtec_aurora_sdk_lidar_scan_point_t> & laserPoints
+            , bool isClockwise
+            , bool isLaserDataReverse
+            , sensor_msgs::msg::LaserScan& msgScan
+            ) const
     {
         assert(2 <= laserPoints.size());
 
@@ -679,7 +619,7 @@ namespace slamware_ros_sdk
         else
         {
             msgScan.angle_min = C_FLT_PI;
-            msgScan.angle_max = (-C_FLT_PI + absAngleIncrement_);
+            msgScan.angle_max = (-C_FLT_PI + absAngleIncrement_); 
             msgScan.angle_increment = -absAngleIncrement_;
         }
 
@@ -700,18 +640,20 @@ namespace slamware_ros_sdk
         }
     }
 
-    void ServerLaserScanWorker::compensateAndfillRangeInMsg_(
-        const slamtec_aurora_sdk_lidar_scan_point_t &laserPoint,
-        bool isClockwise, sensor_msgs::LaserScan &msgScan,
-        std::vector<float> &tmpSrcAngles) const
+    void ServerLaserScanWorker::compensateAndfillRangeInMsg_(const slamtec_aurora_sdk_lidar_scan_point_t& laserPoint
+            , bool isClockwise
+            , sensor_msgs::msg::LaserScan& msgScan
+            , std::vector<float>& tmpSrcAngles
+            ) const
     {
-
         const float srcAngle = calcAngleInNegativePiToPi_(laserPoint.angle);
         const std::uint32_t destIdx = calcCompensateDestIndexBySrcAngle_(srcAngle, isClockwise);
         assert(destIdx < compensatedAngleCnt_);
         const float destAngle = calcAngleInNegativePiToPi_(msgScan.angle_min + msgScan.angle_increment * destIdx);
 
-        const bool shouldWrite = (std::isinf(msgScan.ranges[destIdx]) || isSrcAngleMoreCloseThanOldSrcAngle_(srcAngle, destAngle, tmpSrcAngles[destIdx]));
+        const bool shouldWrite = (std::isinf(msgScan.ranges[destIdx])
+            || isSrcAngleMoreCloseThanOldSrcAngle_(srcAngle, destAngle, tmpSrcAngles[destIdx])
+            );
         if (shouldWrite)
         {
             msgScan.ranges[destIdx] = laserPoint.dist;
@@ -720,10 +662,10 @@ namespace slamware_ros_sdk
         }
     }
 
-    void ServerLaserScanWorker::fillOriginalRangesInMsg_(
-        const std::vector<slamtec_aurora_sdk_lidar_scan_point_t> &laserPoints,
-        bool isLaserDataReverse,
-        sensor_msgs::LaserScan &msgScan) const
+    void ServerLaserScanWorker::fillOriginalRangesInMsg_(const std::vector<slamtec_aurora_sdk_lidar_scan_point_t>& laserPoints
+            , bool isLaserDataReverse
+            , sensor_msgs::msg::LaserScan& msgScan
+            ) const
     {
         msgScan.intensities.resize(laserPoints.size());
         msgScan.ranges.resize(laserPoints.size());
@@ -735,8 +677,8 @@ namespace slamware_ros_sdk
             {
                 fillOriginalRangeInMsg_(laserPoints[i], index++, msgScan);
             }
-            msgScan.angle_min = laserPoints.front().angle;
-            msgScan.angle_max = laserPoints.back().angle;
+            msgScan.angle_min =  laserPoints.front().angle;
+            msgScan.angle_max =  laserPoints.back().angle;
             msgScan.angle_increment = (msgScan.angle_max - msgScan.angle_min) / (double)(msgScan.ranges.size() - 1);
         }
         else
@@ -745,135 +687,32 @@ namespace slamware_ros_sdk
             {
                 fillOriginalRangeInMsg_(laserPoints[i], index++, msgScan);
             }
-            msgScan.angle_min = laserPoints.back().angle;
-            msgScan.angle_max = laserPoints.front().angle;
+            msgScan.angle_min =  laserPoints.back().angle;
+            msgScan.angle_max =  laserPoints.front().angle;
             msgScan.angle_increment = (msgScan.angle_max - msgScan.angle_min) / (double)(msgScan.ranges.size() - 1);
         }
     }
 
-    void ServerLaserScanWorker::fillOriginalRangeInMsg_(
-        const slamtec_aurora_sdk_lidar_scan_point_t &laserPoint,
-        int index,
-        sensor_msgs::LaserScan &msgScan) const
+    void ServerLaserScanWorker::fillOriginalRangeInMsg_(const slamtec_aurora_sdk_lidar_scan_point_t& laserPoint
+            , int index
+            , sensor_msgs::msg::LaserScan& msgScan
+            ) const
     {
-
         msgScan.ranges[index] = laserPoint.dist;
         msgScan.intensities[index] = laserPoint.quality;
     }
 
-    //////////////////////////////////////////////////////////////////////////
-
-    ServerImuRawDataWorker::ServerImuRawDataWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval), lastTimestamp_(0)
+    ServerSystemStatusWorker::ServerSystemStatusWorker(SlamwareRosSdkServer* pRosSdkServer
+        , const std::string& wkName
+        , const std::chrono::milliseconds& triggerInterval
+        )
+        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval), lastDeviceStatus_(std::nullopt),
+        lastRelocalizationStatus_(std::nullopt)
     {
-       
-        auto &nhRos = rosNodeHandle();
-        const auto &srvParams = serverParams();
-        pubImuRawData_ = nhRos.advertise<sensor_msgs::Imu>(srvParams.imu_raw_data_topic, 10);
-        //convert g to m/s2
-        acc_scale_ = 9.806649344;
-        // convert dps to rad/s
-        gyro_scale_ = M_PI/180;
-    }
-
-    ServerImuRawDataWorker::~ServerImuRawDataWorker()
-    {
-        //
-    }
-
-    bool ServerImuRawDataWorker::reinitWorkLoop()
-    {
-
-        return true;
-    }
-
-    void ServerImuRawDataWorker::doPerform()
-    {
-        auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
-            ROS_ERROR("Failed to get aurora sdk");
-            return;
-        }
-        const auto &srvParams = serverParams();
-        std::vector<slamtec_aurora_sdk_imu_data_t> imuData;
-        if (auroraSDK->dataProvider.peekIMUData(imuData))
-        {
-            for (auto &imu : imuData)
-            {
-                if (imu.timestamp_ns <= lastTimestamp_)
-                {
-                    // ignore the old data that has been fetched before
-                    continue;
-                }
-                lastTimestamp_ = imu.timestamp_ns;
-                sensor_msgs::Imu imuRawDataRos;
-                imuRawDataRos.linear_acceleration.x = imu.acc[0]*acc_scale_;
-                imuRawDataRos.linear_acceleration.y = imu.acc[1]*acc_scale_;
-                imuRawDataRos.linear_acceleration.z = imu.acc[2]*acc_scale_;
-                imuRawDataRos.angular_velocity.x = imu.gyro[0]*gyro_scale_;
-                imuRawDataRos.angular_velocity.y = imu.gyro[1]*gyro_scale_;
-                imuRawDataRos.angular_velocity.z = imu.gyro[2]*gyro_scale_;
-                imuRawDataRos.header.stamp = ros::Time::now();
-                imuRawDataRos.header.frame_id = srvParams.imu_frame;
-                pubImuRawData_.publish(imuRawDataRos);
-            }
-        }
-    }
-
-    //////////////////////////////////////////////////////////////////////////
-
-    RosConnectWorker::RosConnectWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval)
-    {
-        auto &nhRos = rosNodeHandle();
-        pubRosConnect_ = nhRos.advertise<std_msgs::String>("state", 1);
-    }
-
-    RosConnectWorker::~RosConnectWorker()
-    {
-        //
-    }
-
-    bool RosConnectWorker::reinitWorkLoop()
-    {
-        if (!this->super_t::reinitWorkLoop())
-            return false;
-
-        isWorkLoopInitOk_ = true;
-        return isWorkLoopInitOk_;
-    }
-
-    void RosConnectWorker::doPerform()
-    {
-        auto connectStatus = std_msgs::String();
-        connectStatus.data = "connected";
-
-        auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
-            connectStatus.data = "disconnected";
-        }
-        pubRosConnect_.publish(connectStatus);
-    }
-
-    ServerSystemStatusWorker::ServerSystemStatusWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval),
-          lastRelocalizationStatus_(std::nullopt)
-    {
-        const auto &srvParams = serverParams();
-        auto &nhRos = rosNodeHandle();
-        pubSystemStatus_ = nhRos.advertise<slamware_ros_sdk::SystemStatus>(srvParams.system_status_topic_name, 1);
-        pubRelocalizaitonStatus_ = nhRos.advertise<slamware_ros_sdk::RelocalizationStatus>(srvParams.relocalization_status_topic_name, 1);
+        const auto& srvParams = serverParams();
+        auto nhRos = rosNodeHandle();
+        pubSystemStatus_ = nhRos->create_publisher<slamware_ros_sdk::msg::SystemStatus>(srvParams.getParameter<std::string>("system_status_topic_name"), 1);
+        pubRelocalizaitonStatus_ = nhRos->create_publisher<slamware_ros_sdk::msg::RelocalizationStatus>(srvParams.getParameter<std::string>("relocalization_status_topic_name"), 1);
     }
 
     ServerSystemStatusWorker::~ServerSystemStatusWorker()
@@ -890,27 +729,27 @@ namespace slamware_ros_sdk
     void ServerSystemStatusWorker::doPerform()
     {
         auto aurora = rosSdkServer()->safeGetAuroraSdk();
-        if (!aurora)
+        if(!aurora)
         {
-            ROS_ERROR("Failed to get aurora sdk");
+            RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to get aurora sdk");
             return;
         }
 
         slamtec_aurora_sdk_device_status_desc_t result;
-        slamware_ros_sdk::SystemStatus resp;
-        if (aurora->dataProvider.peekVSLAMSystemStatus(result))
+        slamware_ros_sdk::msg::SystemStatus resp;
+        if(aurora->dataProvider.peekVSLAMSystemStatus(result))
         {
-            // get current time in ns
-            resp.timestamp_ns = ros::Time::now().toNSec();
-            switch (result.status)
+            //get current time in ns
+            resp.timestamp_ns = rclcpp::Clock().now().nanoseconds();
+            switch (result.status)  
             {
             case SLAMTEC_AURORA_SDK_DEVICE_INITED:
             {
-                if (lastDeviceStatus_.has_value() && lastDeviceStatus_.value() == SLAMTEC_AURORA_SDK_DEVICE_INITED)
+                if(lastDeviceStatus_.has_value() && lastDeviceStatus_.value() == SLAMTEC_AURORA_SDK_DEVICE_INITED)
                 {
                     resp.status = "DeviceRunning";
                 }
-                else
+                else 
                     resp.status = "DeviceInited";
                 break;
             }
@@ -922,7 +761,7 @@ namespace slamware_ros_sdk
                 break;
             case SLAMTEC_AURORA_SDK_DEVICE_OPTIMIZATION_COMPLETED:
             {
-                if (lastDeviceStatus_.has_value() && lastDeviceStatus_.value() == SLAMTEC_AURORA_SDK_DEVICE_OPTIMIZATION_COMPLETED)
+                if(lastDeviceStatus_.has_value() && lastDeviceStatus_.value() == SLAMTEC_AURORA_SDK_DEVICE_OPTIMIZATION_COMPLETED)
                 {
                     resp.status = "DeviceRunning";
                 }
@@ -935,7 +774,7 @@ namespace slamware_ros_sdk
                 break;
             case SLAMTEC_AURORA_SDK_DEVICE_TRACKING_RECOVERED:
             {
-                if (lastDeviceStatus_.has_value() && lastDeviceStatus_.value() == SLAMTEC_AURORA_SDK_DEVICE_TRACKING_RECOVERED)
+                if(lastDeviceStatus_.has_value() && lastDeviceStatus_.value() == SLAMTEC_AURORA_SDK_DEVICE_TRACKING_RECOVERED)
                 {
                     resp.status = "DeviceRunning";
                 }
@@ -943,10 +782,10 @@ namespace slamware_ros_sdk
                     resp.status = "DeviceTrackingRecovered";
                 break;
             }
-            case SLAMTEC_AURORA_SDK_DEVICE_MAP_CLEARED:
+            case  SLAMTEC_AURORA_SDK_DEVICE_MAP_CLEARED:    
                 resp.status = "DeviceMapCleared";
                 break;
-            case SLAMTEC_AURORA_SDK_DEVICE_MAP_LOADING_STARTED:
+            case  SLAMTEC_AURORA_SDK_DEVICE_MAP_LOADING_STARTED:
                 resp.status = "DeviceMapLoadingStarted";
                 break;
             case SLAMTEC_AURORA_SDK_DEVICE_MAP_SAVING_STARTED:
@@ -1010,15 +849,14 @@ namespace slamware_ros_sdk
             }
 
             lastDeviceStatus_ = result.status;
-            pubSystemStatus_.publish(resp);
+            pubSystemStatus_->publish(resp);
         }
 
         slamtec_aurora_sdk_relocalization_status_t reloc_status;
-        slamware_ros_sdk::RelocalizationStatus reloc_resp;
-        if (aurora->dataProvider.peekRelocalizationStatus(reloc_status))
+        slamware_ros_sdk::msg::RelocalizationStatus reloc_resp;
+        if(aurora->dataProvider.peekRelocalizationStatus(reloc_status))
         {
-            reloc_resp.timestamp_ns = ros::Time::now().toNSec();
-            ;
+            reloc_resp.timestamp_ns = rclcpp::Clock().now().nanoseconds();
             {
                 switch (reloc_status.status)
                 {
@@ -1030,7 +868,7 @@ namespace slamware_ros_sdk
                     break;
                 case SLAMTEC_AURORA_SDK_RELOCALIZATION_SUCCEED:
                 {
-                    if (lastRelocalizationStatus_.has_value() && lastRelocalizationStatus_.value() == SLAMTEC_AURORA_SDK_RELOCALIZATION_SUCCEED)
+                    if(lastRelocalizationStatus_.has_value() && lastRelocalizationStatus_.value() == SLAMTEC_AURORA_SDK_RELOCALIZATION_SUCCEED)
                     {
                         reloc_resp.status = "RelocalizationNone";
                     }
@@ -1040,7 +878,7 @@ namespace slamware_ros_sdk
                 }
                 case SLAMTEC_AURORA_SDK_RELOCALIZATION_FAILED:
                 {
-                    if (lastRelocalizationStatus_.has_value() && lastRelocalizationStatus_.value() == SLAMTEC_AURORA_SDK_RELOCALIZATION_FAILED)
+                    if(lastRelocalizationStatus_.has_value() && lastRelocalizationStatus_.value() == SLAMTEC_AURORA_SDK_RELOCALIZATION_FAILED)
                     {
                         reloc_resp.status = "RelocalizationNone";
                     }
@@ -1050,7 +888,7 @@ namespace slamware_ros_sdk
                 }
                 case SLAMTEC_AURORA_SDK_RELOCALIZATION_ABORTED:
                 {
-                    if (lastRelocalizationStatus_.has_value() && lastRelocalizationStatus_.value() == SLAMTEC_AURORA_SDK_RELOCALIZATION_ABORTED)
+                    if(lastRelocalizationStatus_.has_value() && lastRelocalizationStatus_.value() == SLAMTEC_AURORA_SDK_RELOCALIZATION_ABORTED)
                     {
                         reloc_resp.status = "RelocalizationNone";
                     }
@@ -1064,21 +902,21 @@ namespace slamware_ros_sdk
             }
 
             lastRelocalizationStatus_ = reloc_status.status;
-            pubRelocalizaitonStatus_.publish(reloc_resp);
+            pubRelocalizaitonStatus_->publish(reloc_resp);
         }
     }
 
-    ServerStereoImageWorker::ServerStereoImageWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
+    //////////////////////////////////////////////////////////////////////////
+    ServerStereoImageWorker::ServerStereoImageWorker(SlamwareRosSdkServer *pRosSdkServer,
+                                                     const std::string &wkName,
+                                                     const std::chrono::milliseconds &triggerInterval)
         : super_t(pRosSdkServer, wkName, triggerInterval),lastTimestamp_(0)
     {
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         auto nhRos = rosNodeHandle();
-        pubLeftImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.left_image_raw_topic_name, 1);
-        pubRightImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.right_image_raw_topic_name, 1);
-        pubStereoKeyPoints_ = nhRos.advertise<sensor_msgs::Image>(srvParams.stereo_keypoints_topic_name, 1);
+        pubLeftImage_ = nhRos->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("left_image_raw_topic_name"), 5);
+        pubRightImage_ = nhRos->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("right_image_raw_topic_name"), 5);
+        pubStereoKeyPoints_ = nhRos->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("stereo_keypoints_topic_name"), 5);
     }
 
     ServerStereoImageWorker::~ServerStereoImageWorker()
@@ -1090,10 +928,13 @@ namespace slamware_ros_sdk
         // Reinitialize the work loop if necessary
         return true;
     }
+
     void ServerStereoImageWorker::doPerform()
     {
+        // Fill leftImage and rightImage with actual data from Aurora SDK
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
         RemoteTrackingFrameInfo trackingFrame;
+        //filter outdate frame
         if (auroraSDK->dataProvider.peekTrackingData(trackingFrame))
         {
             if(trackingFrame.trackingInfo.timestamp_ns>lastTimestamp_)
@@ -1109,7 +950,7 @@ namespace slamware_ros_sdk
        {
             return;
        }
-        
+
         cv::Mat left, right;
         trackingFrame.leftImage.toMat(left);
         trackingFrame.rightImage.toMat(right);
@@ -1126,38 +967,40 @@ namespace slamware_ros_sdk
             cv::cvtColor(left, left, cv::COLOR_GRAY2RGB);
         else
             return;
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         // Get left and right images from the Aurora SDK
-     
-        if(!srvParams.raw_image_on)
+        if(!srvParams.getParameter<bool>("raw_image_on"))
         {
-            std_msgs::Header header_left;
+            std_msgs::msg::Header header_left;
             cv_bridge::CvImage img_bridge_left;
-            header_left.frame_id = srvParams.camera_left;
-            header_left.stamp = ros::Time::now();
+            header_left.frame_id = srvParams.getParameter<std::string>("camera_left");
+            header_left.stamp = rclcpp::Clock().now();
             img_bridge_left = cv_bridge::CvImage(header_left, sensor_msgs::image_encodings::RGB8, left);
-            sensor_msgs::Image leftImage;
-            img_bridge_left.toImageMsg(leftImage);
-            pubLeftImage_.publish(leftImage);
+            sensor_msgs::msg::Image::SharedPtr leftImage = img_bridge_left.toImageMsg();
+            pubLeftImage_->publish(*leftImage);
         }
+       
+
         if(right.channels()==3)
             cv::cvtColor(right, right, cv::COLOR_BGR2RGB);
         else if(right.channels()==1)
             cv::cvtColor(right, right, cv::COLOR_GRAY2RGB);
         else
             return;
-        
-        if(!srvParams.raw_image_on)
+           
+        if(!srvParams.getParameter<bool>("raw_image_on"))
         {
-            std_msgs::Header header_right;
+            std_msgs::msg::Header header_right;
             cv_bridge::CvImage img_bridge_right;
-            header_right.frame_id = srvParams.camera_right;
-            header_right.stamp = ros::Time::now();
+            header_right.frame_id = srvParams.getParameter<std::string>("camera_right");
+            header_right.stamp = rclcpp::Clock().now();
             img_bridge_right = cv_bridge::CvImage(header_right, sensor_msgs::image_encodings::RGB8, right);
-            sensor_msgs::Image rightImage;
-            img_bridge_right.toImageMsg(rightImage);
-            pubRightImage_.publish(rightImage);
+            sensor_msgs::msg::Image::SharedPtr rightImage = img_bridge_right.toImageMsg();
+            // sensor_msgs::msg::Image::SharedPtr rightImage = img_bridge_left.toImageMsg();
+            pubRightImage_->publish(*rightImage);
         }
+
+
         // Get left and right keypoints from the Aurora SDK
         for (size_t i = 0; i < trackingFrame.getKeypointsLeftCount(); i++)
         {
@@ -1174,25 +1017,105 @@ namespace slamware_ros_sdk
 
         cv::Mat merged;
         cv::hconcat(left, right, merged);
-        std_msgs::Header header_stereo_keypoints;
+        std_msgs::msg::Header header_stereo_keypoints;
         cv_bridge::CvImage img_bridge_stereo;
-        header_stereo_keypoints.frame_id = srvParams.camera_left;
-        header_stereo_keypoints.stamp = ros::Time::now();
+        header_stereo_keypoints.frame_id = srvParams.getParameter<std::string>("camera_left");
+        header_stereo_keypoints.stamp = rclcpp::Clock().now();
         img_bridge_stereo = cv_bridge::CvImage(header_stereo_keypoints, sensor_msgs::image_encodings::RGB8, merged);
-        sensor_msgs::Image mergeImage;
-        img_bridge_stereo.toImageMsg(mergeImage);
-        pubStereoKeyPoints_.publish(mergeImage);
+        sensor_msgs::msg::Image::SharedPtr mergeImage = img_bridge_stereo.toImageMsg();
+        pubStereoKeyPoints_->publish(*mergeImage);
     }
 
-    ServerPointCloudWorker::ServerPointCloudWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
+    // //////////////////////////////////////////////////////////////////////////
+    // ServerStereoCameraInfoWorker::ServerStereoCameraInfoWorker(sSlamwareRosSdkServer *pRosSdkServer,
+    //                                                  const std::string &wkName,
+    //                                                  const std::chrono::milliseconds &triggerInterval)
+    //     : super_t(pRosSdkServer, wkName, triggerInterval)
+    // {
+    //     pubLeftCameraInfo_ = nhRos->create_publisher<sensor_msgs::msg::CameraInfo>("/camera/left/camera_info", 10);
+    //     pubRightCameraInfo_ = nhRos->create_publisher<sensor_msgs::msg::CameraInfo>("/camera/right/camera_info", 10);
+    // }
+
+    // ServerStereoCameraInfoWorker::~ServerStereoCameraInfoWorker()
+    // {
+    // }
+
+    // bool ServerStereoCameraInfoWorker::reinitWorkLoop()
+    // {
+    //     // Reinitialize the work loop if necessary
+    //     return true;
+    // }
+
+    // void ServerStereoCameraInfoWorker::doPerform()
+    // {
+
+    // }
+    
+    ServerImuRawDataWorker::ServerImuRawDataWorker(SlamwareRosSdkServer *pRosSdkServer, const std::string &wkName, const std::chrono::milliseconds &triggerInterval)
+        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval)
+        , lastTimestamp_(0)
+    {
+        const auto& srvParams = serverParams();
+        auto nhRos = rosNodeHandle();
+        pubImuRawData_ = nhRos->create_publisher<sensor_msgs::msg::Imu>(srvParams.getParameter<std::string>("imu_raw_data_topic"), 10);
+        //convert g to m/s2
+        acc_scale_ = 9.806649344;
+        // convert dps to rad/s
+        gyro_scale_ = M_PI/180;
+    }
+
+    ServerImuRawDataWorker::~ServerImuRawDataWorker()
+    {
+        //
+    }
+
+    bool ServerImuRawDataWorker::reinitWorkLoop()
+    {
+        // Reinitialize the work loop if necessary
+        return true;
+    }
+
+    void ServerImuRawDataWorker::doPerform()
+    {
+        auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
+        if (!auroraSDK)
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "Failed to get aurora sdk");
+            return;
+        }
+
+        std::vector<slamtec_aurora_sdk_imu_data_t> imuData;
+        const auto& srvParams = serverParams();
+        if (auroraSDK->dataProvider.peekIMUData(imuData))
+        {
+            for (auto &imu : imuData)
+            {
+                if (imu.timestamp_ns <= lastTimestamp_)
+                {
+                    // ignore the old data that has been fetched before
+                    continue;
+                }
+                lastTimestamp_ = imu.timestamp_ns;
+                sensor_msgs::msg::Imu imuRawDataRos;
+                imuRawDataRos.linear_acceleration.x = imu.acc[0]*acc_scale_;
+                imuRawDataRos.linear_acceleration.y = imu.acc[1]*acc_scale_;
+                imuRawDataRos.linear_acceleration.z = imu.acc[2]*acc_scale_;
+                imuRawDataRos.angular_velocity.x = imu.gyro[0]*gyro_scale_;
+                imuRawDataRos.angular_velocity.y = imu.gyro[1]*gyro_scale_;
+                imuRawDataRos.angular_velocity.z = imu.gyro[2]*gyro_scale_;
+                imuRawDataRos.header.stamp = rclcpp::Clock().now();
+                imuRawDataRos.header.frame_id = srvParams.getParameter<std::string>("imu_frame");
+                pubImuRawData_->publish(imuRawDataRos);
+            }
+        }
+    }
+
+    ServerPointCloudWorker::ServerPointCloudWorker(SlamwareRosSdkServer *pRosSdkServer, const std::string &wkName, const std::chrono::milliseconds &triggerInterval)
         : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval)
     {
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         auto nhRos = rosNodeHandle();
-        pubPointCloud_ = nhRos.advertise<sensor_msgs::PointCloud2>(srvParams.point_cloud_topic_name, 1);
+        pubPointCloud_ = nhRos->create_publisher<sensor_msgs::msg::PointCloud2>(srvParams.getParameter<std::string>("point_cloud_topic_name"), 5);
     }
 
     ServerPointCloudWorker::~ServerPointCloudWorker()
@@ -1205,12 +1128,13 @@ namespace slamware_ros_sdk
         // Reinitialize the work loop if necessary
         return true;
     }
+
     void ServerPointCloudWorker::doPerform()
     {
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
         if (!auroraSDK)
         {
-            ROS_ERROR("Failed to get aurora sdk");
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "Failed to get aurora sdk");
             return;
         }
 
@@ -1218,9 +1142,9 @@ namespace slamware_ros_sdk
         slamtec_aurora_sdk_map_desc_t activeMapDesc;
         std::vector<slamtec_aurora_sdk_map_point_desc_t> mapPoints;
         slamtec_aurora_sdk_global_map_desc_t globalMapDesc;
-        if (!auroraSDK->dataProvider.getGlobalMappingInfo(globalMapDesc))
+        if(!auroraSDK->dataProvider.getGlobalMappingInfo(globalMapDesc))
         {
-            ROS_ERROR("Failed to get global mapping info");
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "Failed to get global mapping info");
             return;
         }
 
@@ -1230,27 +1154,28 @@ namespace slamware_ros_sdk
         mapDataVisitor.subscribeMapPointData([&](const slamtec_aurora_sdk_map_point_desc_t &mapPointDesc)
                                              {
                                             // handle the map point data
-                                            mapPoints.push_back(mapPointDesc); });
+                                            mapPoints.push_back(mapPointDesc); 
+                                            });
 
         // start the accessing session, this will block the background syncing thread during the accessing process.
         if (!auroraSDK->dataProvider.accessMapData(mapDataVisitor, {(uint32_t)activeMapId}))
         {
-            ROS_ERROR("Failed to start the accessing session");
+            RCLCPP_ERROR(rclcpp::get_logger("server workers"), "Failed to start the accessing session");
             return;
         }
 
         // tf_vslam_to_ros.setValue(0, 1, 0,
         //                        -1, 0, 0,
         //                        0, 0, 1);
-        const tf::Matrix3x3 tf_vslam_to_ros(1, 0, 0,
-                                            0, 1, 0,
-                                            0, 0, 1);
+        const tf2::Matrix3x3 tf_vslam_to_ros(1, 0, 0,
+                                             0, 1, 0,
+                                             0, 0, 1);
         // publish map point to sensor_msgs::msg::PointCloud2
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         const int num_channels = 3; // x y z
-        sensor_msgs::PointCloud2 cloud;
-        cloud.header.stamp = ros::Time::now();
-        cloud.header.frame_id = srvParams.map_frame;
+        sensor_msgs::msg::PointCloud2 cloud;
+        cloud.header.stamp = rclcpp::Clock().now();
+        cloud.header.frame_id = srvParams.getParameter<std::string>("map_frame");
         cloud.height = 1;
         cloud.width = mapPoints.size();
         cloud.is_dense = true;
@@ -1265,7 +1190,7 @@ namespace slamware_ros_sdk
             cloud.fields[i].name = channel_id[i];
             cloud.fields[i].offset = i * sizeof(float);
             cloud.fields[i].count = 1;
-            cloud.fields[i].datatype = sensor_msgs::PointField::FLOAT32;
+            cloud.fields[i].datatype = sensor_msgs::msg::PointField::FLOAT32;
         }
 
         cloud.data.resize(cloud.row_step * cloud.height);
@@ -1276,9 +1201,9 @@ namespace slamware_ros_sdk
         float data_array[num_channels];
         for (unsigned int i = 0; i < cloud.width; i++)
         {
-            // map points from orbslam2 aixs to ros axis
-            tf::Vector3 mapPoint(mapPoints[i].position.x, mapPoints[i].position.y, mapPoints[i].position.z);
-            tf::Vector3 mapPoint_ros = tf_vslam_to_ros * mapPoint;
+            //map points from orbslam2 aixs to ros axis
+            tf2::Vector3 mapPoint(mapPoints[i].position.x, mapPoints[i].position.y, mapPoints[i].position.z);
+            tf2::Vector3 mapPoint_ros = tf_vslam_to_ros * mapPoint;
             data_array[0] = mapPoint_ros.x();
             data_array[1] = mapPoint_ros.y();
             data_array[2] = mapPoint_ros.z();
@@ -1286,10 +1211,46 @@ namespace slamware_ros_sdk
                    data_array, num_channels * sizeof(float));
         }
 
-        pubPointCloud_.publish(cloud);
+        pubPointCloud_->publish(cloud);
     }
+
     //////////////////////////////////////////////////////////////////////////
 
+    RosConnectWorker::RosConnectWorker(SlamwareRosSdkServer *pRosSdkServer, const std::string &wkName, const std::chrono::milliseconds &triggerInterval)
+        : ServerWorkerBase(pRosSdkServer, wkName, triggerInterval)
+    {
+        auto nhRos = rosNodeHandle();
+        pubRosConnect_ = nhRos->create_publisher<std_msgs::msg::String>("/slamware_ros_sdk_server_node/state", 1);
+    }
+
+    RosConnectWorker::~RosConnectWorker()
+    {
+        //
+    }
+
+    bool RosConnectWorker::reinitWorkLoop()
+    {
+        if (!this->super_t::reinitWorkLoop())
+            return false;
+
+        isWorkLoopInitOk_ = true;
+        return isWorkLoopInitOk_;
+    }
+
+    void RosConnectWorker::doPerform()
+    {
+        auto connectStatus = std_msgs::msg::String();
+        connectStatus.data = "connected";
+        auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
+        if (!auroraSDK)
+        {
+            connectStatus.data = "disconnected";
+        }
+        pubRosConnect_->publish(connectStatus);
+    }
+
+    //////////////////////////////////////////////////////////////////////////
+    
     ServerEnhancedImagingWorker::ServerEnhancedImagingWorker(SlamwareRosSdkServer *pRosSdkServer,
                                                              const std::string &wkName,
                                                              const std::chrono::milliseconds &triggerInterval)
@@ -1299,15 +1260,15 @@ namespace slamware_ros_sdk
         , isInitialized_(false)
         , depth_lastTimestamp_(0),segmentation_lastTimestamp_(0)
     {
-        const auto &srvParams = serverParams();
+        const auto& srvParams = serverParams();
         auto nhRos = rosNodeHandle();
-
+        
         // Initialize depth camera publishers
-        pubDepthImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.depth_image_raw_topic_name, 5);
-        pubDepthColorized_ = nhRos.advertise<sensor_msgs::Image>(srvParams.depth_image_colorized_topic_name, 5);
-
+        pubDepthImage_ = nhRos->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("depth_image_raw_topic_name"), 5);
+        pubDepthColorized_ = nhRos->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("depth_image_colorized_topic_name"), 5);
+                
         // Initialize semantic segmentation publishers
-        pubSemanticSegmentation_ = nhRos.advertise<sensor_msgs::Image>(srvParams.semantic_segmentation_topic_name, 5);
+        pubSemanticSegmentation_ = nhRos->create_publisher<sensor_msgs::msg::Image>(srvParams.getParameter<std::string>("semantic_segmentation_topic_name"), 5);
     }
 
     ServerEnhancedImagingWorker::~ServerEnhancedImagingWorker()
@@ -1320,51 +1281,45 @@ namespace slamware_ros_sdk
             return false;
 
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
+        if (!auroraSDK) {
             isWorkLoopInitOk_ = false;
             return false;
         }
 
         // Check depth camera support
         depthCameraSupported_ = auroraSDK->enhancedImaging.isDepthCameraSupported();
-        if (depthCameraSupported_)
-        {
+        if (depthCameraSupported_) {
             auroraSDK->controller.setEnhancedImagingSubscription(SLAMTEC_AURORA_SDK_ENHANCED_IMAGE_TYPE_DEPTH, true);
             // Enable depth camera post-filtering (refines depth data; flags currently ignored by SDK)
             auroraSDK->enhancedImaging.setDepthCameraPostFiltering(true, 0);
-            ROS_INFO("Depth camera supported, subscription enabled, post-filtering on");
+            RCLCPP_INFO(rosNodeHandle()->get_logger(), "Depth camera supported, subscription enabled, post-filtering on");
         } else {
-            ROS_WARN("Depth camera not supported");
+            RCLCPP_WARN(rosNodeHandle()->get_logger(), "Depth camera not supported");
         }
 
         // Check semantic segmentation support
         semanticSegmentationSupported_ = auroraSDK->enhancedImaging.isSemanticSegmentationReady();
-        if (semanticSegmentationSupported_)
-        {
+        if (semanticSegmentationSupported_) {
             auroraSDK->controller.setEnhancedImagingSubscription(SLAMTEC_AURORA_SDK_ENHANCED_IMAGE_TYPE_SEMANTIC, true);
-            ROS_INFO("Semantic segmentation supported and subscription enabled");
-
+            RCLCPP_INFO(rosNodeHandle()->get_logger(), "Semantic segmentation supported and subscription enabled");
+            
             // Get semantic segmentation label information
             std::string labelSetName;
-            if (auroraSDK->enhancedImaging.getSemanticSegmentationLabelSetName(labelSetName))
-            {
-                ROS_INFO("Semantic segmentation label set: %s", labelSetName.c_str());
+            if (auroraSDK->enhancedImaging.getSemanticSegmentationLabelSetName(labelSetName)) {
+                RCLCPP_INFO(rosNodeHandle()->get_logger(), "Semantic segmentation label set: %s", labelSetName.c_str());
             }
-
+            
             slamtec_aurora_sdk_semantic_segmentation_label_info_t labelInfo;
-            if (auroraSDK->enhancedImaging.getSemanticSegmentationLabels(labelInfo))
-            {
-                for (int i = 0; i < labelInfo.label_count; ++i)
-                {
-                    ROS_INFO("Label ID: %d, Name: %s", i, labelInfo.label_names[i].name);
+            if (auroraSDK->enhancedImaging.getSemanticSegmentationLabels(labelInfo)) {
+                for (int i = 0; i < labelInfo.label_count; ++i) {
+                    RCLCPP_INFO(rosNodeHandle()->get_logger(), "Label ID: %d, Name: %s", i, labelInfo.label_names[i].name);
                 }
                 // Generate class colors
                 generateClassColors(labelInfo.label_count);
-                ROS_INFO("Class colors generated");
+                RCLCPP_INFO(rosNodeHandle()->get_logger(), "Class colors generated");
             }
         } else {
-            ROS_WARN("Semantic segmentation not supported");
+            RCLCPP_WARN(rosNodeHandle()->get_logger(), "Semantic segmentation not supported");
         }
 
         isInitialized_ = true;
@@ -1374,47 +1329,42 @@ namespace slamware_ros_sdk
 
     void ServerEnhancedImagingWorker::doPerform()
     {
-        if (!isInitialized_)
-        {
+        if (!isInitialized_) {
             return;
         }
 
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
+        if (!auroraSDK) {
             return;
         }
 
-        auto currentTime = ros::Time::now();
-        std_msgs::Header header;
+        auto currentTime = rclcpp::Clock().now();
+        std_msgs::msg::Header header;
         header.stamp = currentTime;
         header.frame_id = "camera_depth_optical_frame";
 
         // Process depth camera data
-        if (depthCameraSupported_)
-        {
+        if (depthCameraSupported_) {
             processDepthCamera(header);
         }
 
         // Process semantic segmentation data
-        if (semanticSegmentationSupported_)
-        {
+        if (semanticSegmentationSupported_) {
             processSemanticSegmentation(header);
         }
     }
 
-    void ServerEnhancedImagingWorker::processDepthCamera(const std_msgs::Header &header)
+    void ServerEnhancedImagingWorker::processDepthCamera(const std_msgs::msg::Header& header)
     {
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
+        if (!auroraSDK) {
             return;
         }
 
         RemoteEnhancedImagingFrame depthFrame;
-
+             
         // Early return if cannot peek frame
-        if (auroraSDK->enhancedImaging.peekDepthCameraFrame(depthFrame, SLAMTEC_AURORA_SDK_DEPTHCAM_FRAME_TYPE_DEPTH_MAP))
+        if (auroraSDK->enhancedImaging.peekDepthCameraFrame(depthFrame, SLAMTEC_AURORA_SDK_DEPTHCAM_FRAME_TYPE_DEPTH_MAP)) 
         {
             if(depthFrame.desc.timestamp_ns>depth_lastTimestamp_)
             {
@@ -1429,34 +1379,34 @@ namespace slamware_ros_sdk
         {
             return;
         }
-
+        
         cv::Mat depthImg;
         depthFrame.image.toMat(depthImg);
-
+        
         // Publish raw depth image
         cv_bridge::CvImage depthBridge(header, sensor_msgs::image_encodings::TYPE_32FC1, depthImg);
-        pubDepthImage_.publish(depthBridge.toImageMsg());
-
+        pubDepthImage_->publish(*depthBridge.toImageMsg());
+        
         // Create and publish colorized depth image
         cv::Mat heatmap;
         depthImg.convertTo(heatmap, CV_8UC1, -255.0 / 10.0f, 255);
         cv::Mat depthColorized;
         cv::applyColorMap(heatmap, depthColorized, cv::COLORMAP_JET);
-
+        
         cv_bridge::CvImage depthColorizedBridge(header, sensor_msgs::image_encodings::BGR8, depthColorized);
-        pubDepthColorized_.publish(depthColorizedBridge.toImageMsg());
+        pubDepthColorized_->publish(*depthColorizedBridge.toImageMsg());
     }
 
-    void ServerEnhancedImagingWorker::processSemanticSegmentation(const std_msgs::Header &header)
+    void ServerEnhancedImagingWorker::processSemanticSegmentation(const std_msgs::msg::Header& header)
     {
         auto auroraSDK = rosSdkServer()->safeGetAuroraSdk();
-        if (!auroraSDK)
-        {
+        if (!auroraSDK) {
             return;
         }
 
         RemoteEnhancedImagingFrame segFrame;
-        // Early return if cannot peek frame
+        
+        //filter outdate frame
         if (auroraSDK->enhancedImaging.peekSemanticSegmentationFrame(segFrame))
         {
             if(segFrame.desc.timestamp_ns>segmentation_lastTimestamp_)
@@ -1477,20 +1427,17 @@ namespace slamware_ros_sdk
         segFrame.image.toMat(localSegMap);
         auto currentSegMap = localSegMap.clone();
 
-        if (currentSegMap.empty())
-        {
-            return;
+        if (currentSegMap.empty()) {
+           return; 
         }
-
+        
         // Peek camera preview image for overlay (if needed)
         RemoteStereoImagePair cameraImagePair;
         cv::Mat currentCameraImage;
-
-        if (auroraSDK->dataProvider.peekCameraPreviewImage(cameraImagePair, segFrame.desc.timestamp_ns, true))
-        {
+        
+        if (auroraSDK->dataProvider.peekCameraPreviewImage(cameraImagePair, segFrame.desc.timestamp_ns, true)) {
             cameraImagePair.leftImage.toMat(currentCameraImage);
-            if (currentCameraImage.channels() == 1)
-            {
+            if (currentCameraImage.channels() == 1) {
                 cv::cvtColor(currentCameraImage, currentCameraImage, cv::COLOR_GRAY2BGR);
             }
         }
@@ -1500,96 +1447,61 @@ namespace slamware_ros_sdk
 
         // Publish colorized segmentation
         cv_bridge::CvImage segBridge(header, sensor_msgs::image_encodings::BGR8, currentOverlayBase);
-        pubSemanticSegmentation_.publish(segBridge.toImageMsg());
+        pubSemanticSegmentation_->publish(*segBridge.toImageMsg());
     }
 
-    cv::Mat ServerEnhancedImagingWorker::createCameraOverlay(const cv::Mat &cameraImage, const cv::Mat &colorizedSegMap)
+    cv::Mat ServerEnhancedImagingWorker::createCameraOverlay(const cv::Mat& cameraImage, const cv::Mat& colorizedSegMap)
     {
-        if (cameraImage.empty() || colorizedSegMap.empty())
-        {
+        if (cameraImage.empty() || colorizedSegMap.empty()) {
             return colorizedSegMap.clone();
         }
-
+        
         cv::Mat overlay = cameraImage.clone();
-
+        
         // Optimized blending using OpenCV vectorized operations
         cv::Mat mask;
         cv::inRange(colorizedSegMap, cv::Scalar(1, 1, 1), cv::Scalar(255, 255, 255), mask);
-
+        
         // Blend only non-black pixels
         cv::Mat blendedSeg;
         cv::addWeighted(cameraImage, 0.6, colorizedSegMap, 0.4, 0, blendedSeg);
         blendedSeg.copyTo(overlay, mask);
-
+        
         return overlay;
     }
 
-    cv::Mat ServerEnhancedImagingWorker::colorizeSegmentationMap(const cv::Mat &segMap)
+    cv::Mat ServerEnhancedImagingWorker::colorizeSegmentationMap(const cv::Mat& segMap)
     {
         cv::Mat colorized(segMap.size(), CV_8UC3);
-        for (int y = 0; y < segMap.rows; y++)
-        {
-            for (int x = 0; x < segMap.cols; x++)
-            {
+        for (int y = 0; y < segMap.rows; y++) {
+            for (int x = 0; x < segMap.cols; x++) {
                 uint8_t classId = segMap.at<uint8_t>(y, x);
-                if (classId < classColors_.size())
-                {
+                if (classId < classColors_.size()) {
                     colorized.at<cv::Vec3b>(y, x) = classColors_[classId];
-                }
-                else
-                {
+                } else {
                     colorized.at<cv::Vec3b>(y, x) = cv::Vec3b(128, 128, 128); // Gray for unknown classes
                 }
             }
         }
-
+        
         return colorized;
     }
 
-    void ServerEnhancedImagingWorker::generateClassColors(int numClasses)
-    {
+    void ServerEnhancedImagingWorker::generateClassColors(int numClasses) {
         classColors_.clear();
         classColors_.resize(numClasses);
-
+        
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dis(50, 255);
-
+        
         // Set background (index 0) to black for transparency effect
         classColors_[0] = cv::Vec3b(0, 0, 0);
-
+        
         // Generate random colors for other classes
-        for (int i = 1; i < numClasses; i++)
-        {
+        for (int i = 1; i < numClasses; i++) {
             classColors_[i] = cv::Vec3b(dis(gen), dis(gen), dis(gen));
         }
     }
-
-    ServerRawImageWorker::ServerRawImageWorker(
-        SlamwareRosSdkServer *pRosSdkServer,
-        const std::string &wkName,
-        const std::chrono::milliseconds &triggerInterval)
-        : super_t(pRosSdkServer, wkName, triggerInterval),lastTimestamp_(0)
-    {
-        const auto &srvParams = serverParams();
-        auto nhRos = rosNodeHandle();
-        pubLeftImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.left_image_raw_topic_name, 1);
-        pubRightImage_ = nhRos.advertise<sensor_msgs::Image>(srvParams.right_image_raw_topic_name, 1);
-    }
-
-    ServerRawImageWorker::~ServerRawImageWorker()
-    {
-    }
-
-    bool ServerRawImageWorker::reinitWorkLoop()
-    {
-        // Reinitialize the work loop if necessary
-        return true;
-    }
-    void ServerRawImageWorker::doPerform()
-    {
-        
-    }
-
 
 }
